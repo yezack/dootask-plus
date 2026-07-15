@@ -1,0 +1,286 @@
+name: "Publish"
+
+on:
+  push:
+    branches:
+      - "pro"
+
+jobs:
+  check-version:
+    permissions:
+      contents: read
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.check-tag.outputs.should_release }}
+      version: ${{ steps.get-version.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get version from package.json
+        id: get-version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Check if tag exists
+        id: check-tag
+        run: |
+          VERSION=${{ steps.get-version.outputs.version }}
+          if git ls-remote --tags origin | grep -q "refs/tags/v${VERSION}$"; then
+            echo "This version v${VERSION} has been released"
+            echo "should_release=false" >> $GITHUB_OUTPUT
+          else
+            echo "Version v${VERSION} has not been released, continue building"
+            echo "should_release=true" >> $GITHUB_OUTPUT
+          fi
+
+  create-release:
+    needs: check-version
+    if: needs.check-version.outputs.should_release == 'true'
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.create-release.outputs.result }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create Release
+        id: create-release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const version = '${{ needs.check-version.outputs.version }}';
+
+            // 从 CHANGELOG.md 提取当前版本段落
+            let changelog = '';
+            const changelogPath = 'CHANGELOG.md';
+            if (fs.existsSync(changelogPath)) {
+              const content = fs.readFileSync(changelogPath, 'utf-8');
+              const regex = new RegExp(`## \\[${version.replace(/\./g, '\\.')}\\][\\s\\S]*?(?=\\n## \\[|$)`);
+              const match = content.match(regex);
+              if (match) {
+                changelog = match[0].trim();
+              }
+            }
+
+            // 创建 release
+            const { data } = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: `v${version}`,
+              name: version,
+              body: changelog || 'No significant changes in this release.',
+              draft: true,
+              prerelease: false
+            })
+            return data.id
+
+  pack-vendor:
+    needs: [ check-version, create-release ]
+    if: needs.check-version.outputs.should_release == 'true'
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: mbstring, intl, gd, xml, zip, swoole
+          tools: composer:v2
+
+      - name: Install Dependencies
+        run: composer install
+
+      - name: Create Vendor Archive
+        run: tar -czf vendor.tar.gz vendor/
+
+      - name: Upload Vendor Archive
+        uses: actions/github-script@v7
+        env:
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        with:
+          script: |
+            const fs = require('fs');
+
+            const data = await fs.promises.readFile('vendor.tar.gz');
+
+            await github.rest.repos.uploadReleaseAsset({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: process.env.RELEASE_ID,
+              name: 'vendor.tar.gz',
+              data: data
+            });
+
+  build-client:
+    needs: [ check-version, create-release, pack-vendor ]
+    if: needs.check-version.outputs.should_release == 'true'
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: "macos-latest"
+            build_type: "mac"
+          - platform: "ubuntu-latest"
+            build_type: "android"
+          - platform: "windows-latest"
+            build_type: "windows"
+
+    runs-on: ${{ matrix.platform }}
+    environment: build
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Use Node.js 20.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20.x
+
+      # Android 构建步骤
+      - name: (Android) Build Js
+        if: matrix.build_type == 'android'
+        uses: nick-fields/retry@v2
+        with:
+          timeout_minutes: 10
+          max_attempts: 3
+          command: |
+            git submodule init
+            git submodule update --remote "resources/mobile"
+            ./cmd appbuild publish
+
+      - name: (Android) Setup JDK 11
+        if: matrix.build_type == 'android'
+        uses: actions/setup-java@v3
+        with:
+          distribution: "zulu"
+          java-version: "11"
+
+      - name: (Android) Build App
+        if: matrix.build_type == 'android'
+        uses: nick-fields/retry@v2
+        with:
+          timeout_minutes: 20
+          max_attempts: 5
+          command: |
+            cd resources/mobile/platforms/android/eeuiApp
+            chmod +x ./gradlew
+            ./gradlew assembleRelease --quiet
+
+      - name: (Android) Upload File
+        if: matrix.build_type == 'android'
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_PUBLIC_URL: ${{ secrets.R2_PUBLIC_URL }}
+        run: |
+          node ./electron/build.js android-upload
+
+      - name: (Android) Upload Release
+        if: matrix.build_type == 'android'
+        uses: actions/github-script@v7
+        env:
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const globby = require('globby');
+
+            // 查找 APK 文件
+            const files = await globby('resources/mobile/platforms/android/eeuiApp/app/build/outputs/apk/release/*.apk');
+
+            for (const file of files) {
+              const data = await fs.promises.readFile(file);
+
+              await github.rest.repos.uploadReleaseAsset({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                release_id: process.env.RELEASE_ID,
+                name: path.basename(file),
+                data: data
+              });
+            }
+
+      # Mac 构建步骤
+      - name: (Mac) Build Client
+        if: matrix.build_type == 'mac'
+        env:
+          APPLEID: ${{ secrets.APPLEID }}
+          APPLEIDPASS: ${{ secrets.APPLEIDPASS }}
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_PUBLIC_URL: ${{ secrets.R2_PUBLIC_URL }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          ./cmd electron mac
+
+      # Windows 构建步骤
+      - name: (Windows) Build Client
+        if: matrix.build_type == 'windows'
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_PUBLIC_URL: ${{ secrets.R2_PUBLIC_URL }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        shell: bash
+        run: |
+          ./cmd electron win
+
+  publish-release:
+    needs: [ check-version, create-release, pack-vendor, build-client ]
+    if: needs.check-version.outputs.should_release == 'true' && github.ref == 'refs/heads/pro'
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Publish Release
+        uses: actions/github-script@v7
+        env:
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
+        with:
+          script: |
+            github.rest.repos.updateRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: process.env.RELEASE_ID,
+              draft: false,
+              prerelease: false
+            })
+
+      - name: Upload Changelog & Publish to Website
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_BUCKET: ${{ secrets.R2_BUCKET }}
+          R2_PUBLIC_URL: ${{ secrets.R2_PUBLIC_URL }}
+        run: |
+          pushd electron || exit
+          npm install
+          popd || exit
+          node ./electron/build.js upload-changelog
+          node ./electron/build.js release

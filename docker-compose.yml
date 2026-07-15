@@ -1,0 +1,127 @@
+services:
+  php:
+    container_name: "dootask-php-${APP_ID}"
+    image: "kuaifan/php:swoole-8.4"
+    shm_size: 2G
+    ulimits:
+      core:
+        soft: 0
+        hard: 0
+    volumes:
+      - shared_data:/usr/share/dootask
+      - ./docker/crontab/crontab.conf:/etc/supervisor/conf.d/crontab.conf
+      - ./docker/php/doo.so:/usr/lib/doo/doo.so
+      - ./docker/php/php.conf:/etc/supervisor/conf.d/php.conf
+      - ./docker/php/license.conf:/etc/supervisor/conf.d/license.conf
+      - ./docker/php/php.ini:/usr/local/etc/php/php.ini
+      - ./docker/logs/supervisor:/var/log/supervisor
+      - ./:/var/www
+    environment:
+      LANG: "C.UTF-8"
+      MODE: "production"
+      MYSQL_HOST: "${DB_HOST}"
+      MYSQL_PORT: "${DB_PORT}"
+      MYSQL_DB_NAME: "${DB_DATABASE}"
+      MYSQL_USERNAME: "${DB_USERNAME}"
+      MYSQL_PASSWORD: "${DB_PASSWORD}"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${LARAVELS_LISTEN_PORT}/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - extnetwork
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  nginx:
+    container_name: "dootask-nginx-${APP_ID}"
+    image: "nginx:alpine"
+    ports:
+      - "${APP_PORT}:80"
+      - "${APP_SSL_PORT:-0}:443"
+    environment:
+      APP_SCHEME: "${APP_SCHEME:-auto}"
+    volumes:
+      - ./docker/nginx/default.conf:/etc/nginx/templates/default.conf.template
+      - ./:/var/www
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    depends_on:
+      php:
+        condition: service_healthy
+    networks:
+      - extnetwork
+    restart: unless-stopped
+
+  redis:
+    container_name: "dootask-redis-${APP_ID}"
+    image: "redis:alpine"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - extnetwork
+    restart: unless-stopped
+
+  mariadb:
+    container_name: "dootask-mariadb-${APP_ID}"
+    image: "mariadb:10.7.3"
+    volumes:
+      - ./docker/mysql/repassword.sh:/etc/mysql/repassword.sh
+      - ./docker/mysql/conf.d:/etc/mysql/conf.d
+      - ./docker/mysql/data:/var/lib/mysql
+    environment:
+      MYSQL_PREFIX: "${DB_PREFIX}"
+      MYSQL_ROOT_PASSWORD: "${DB_ROOT_PASSWORD}"
+      MYSQL_DATABASE: "${DB_DATABASE}"
+      MYSQL_USER: "${DB_USERNAME}"
+      MYSQL_PASSWORD: "${DB_PASSWORD}"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "${DB_USERNAME}", "-p${DB_PASSWORD}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - extnetwork
+    restart: unless-stopped
+
+  appstore:
+    container_name: "dootask-appstore-${APP_ID}"
+    privileged: true
+    image: "dootask/appstore:0.5.4"
+    volumes:
+      - shared_data:/usr/share/dootask
+      - ${HOST_DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
+      - ./:/var/www
+    environment:
+      HOST_PWD: "${PWD}"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost/health"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - extnetwork
+    restart: unless-stopped
+
+networks:
+  extnetwork:
+    name: "dootask-networks-${APP_ID}"
+
+volumes:
+  shared_data:
+    name: "dootask-shared-data-${APP_ID}"
+  redis_data:
+    name: "dootask-redis-data-${APP_ID}"

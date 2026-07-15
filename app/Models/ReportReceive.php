@@ -1,0 +1,45 @@
+<?php
+
+namespace App\Models;
+
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
+
+/**
+ * App\Models\ReportReceive
+ *
+ * @property int $id
+ * @property int $rid
+ * @property \Illuminate\Support\Carbon|null $receive_at 接收时间
+ * @property int $userid 接收人
+ * @property int $read 是否已读
+ * @method static \Illuminate\Database\Eloquent\Builder|AbstractModel cancelAppend()
+ * @method static \Illuminate\Database\Eloquent\Builder|AbstractModel cancelHidden()
+ * @method static \Illuminate\Database\Eloquent\Builder|AbstractModel change($array)
+ * @method static \Illuminate\Database\Eloquent\Builder|AbstractModel getKeyValue()
+ * @method static \Illuminate\Database\Eloquent\Builder|ReportReceive newModelQuery()
+ * @method static \Illuminate\Database\Eloquent\Builder|ReportReceive newQuery()
+ * @method static \Illuminate\Database\Eloquent\Builder|ReportReceive query()
+ * @method static \Illuminate\Database\Eloquent\Builder|AbstractModel remove()
+ * @method static \Illuminate\Database\Eloquent\Builder|AbstractModel saveOrIgnore()
+ * @method static \Illuminate\Database\Eloquent\Builder|ReportReceive whereId($value)
+ * @method static \Illuminate\Database\Eloquent\Builder|ReportReceive whereRead($value)
+ * @method static \Illuminate\Database\Eloquent\Builder|ReportReceive whereReceiveAt($value)
+ * @method static \Illuminate\Database\Eloquent\Builder|ReportReceive whereRid($value)
+ * @method static \Illuminate\Database\Eloquent\Builder|ReportReceive whereUserid($value)
+ * @mixin \Eloquent
+ */
+class ReportReceive extends AbstractModel
+{
+    use HasFactory;
+
+    // 关闭时间戳自动写入
+    public $timestamps = false;
+
+    protected $fillable = [
+        "rid",
+        "receive_at",
+        "userid",
+        "read",
+    ];
+}

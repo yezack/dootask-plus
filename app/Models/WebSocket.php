@@ -1,0 +1,38 @@
+<?php
+
+namespace App\Models;
+
+
+/**
+ * App\Models\WebSocket
+ *
+ * @property int $id
+ * @property string $key
+ * @property string|null $fd
+ * @property string|null $path
+ * @property string|null $platform 平台类型：android, ios, win, mac, web
+ * @property int|null $userid
+ * @property \Illuminate\Support\Carbon|null $created_at
+ * @property \Illuminate\Support\Carbon|null $updated_at
+ * @method static \Illuminate\Database\Eloquent\Builder|AbstractModel cancelAppend()
+ * @method static \Illuminate\Database\Eloquent\Builder|AbstractModel cancelHidden()
+ * @method static \Illuminate\Database\Eloquent\Builder|AbstractModel change($array)
+ * @method static \Illuminate\Database\Eloquent\Builder|AbstractModel getKeyValue()
+ * @method static \Illuminate\Database\Eloquent\Builder|WebSocket newModelQuery()
+ * @method static \Illuminate\Database\Eloquent\Builder|WebSocket newQuery()
+ * @method static \Illuminate\Database\Eloquent\Builder|WebSocket query()
+ * @method static \Illuminate\Database\Eloquent\Builder|AbstractModel remove()
+ * @method static \Illuminate\Database\Eloquent\Builder|AbstractModel saveOrIgnore()
+ * @method static \Illuminate\Database\Eloquent\Builder|WebSocket whereCreatedAt($value)
+ * @method static \Illuminate\Database\Eloquent\Builder|WebSocket whereFd($value)
+ * @method static \Illuminate\Database\Eloquent\Builder|WebSocket whereId($value)
+ * @method static \Illuminate\Database\Eloquent\Builder|WebSocket whereKey($value)
+ * @method static \Illuminate\Database\Eloquent\Builder|WebSocket wherePath($value)
+ * @method static \Illuminate\Database\Eloquent\Builder|WebSocket wherePlatform($value)
+ * @method static \Illuminate\Database\Eloquent\Builder|WebSocket whereUpdatedAt($value)
+ * @method static \Illuminate\Database\Eloquent\Builder|WebSocket whereUserid($value)
+ * @mixin \Eloquent
+ */
+class WebSocket extends AbstractModel
+{
+}

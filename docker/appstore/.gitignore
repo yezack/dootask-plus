@@ -1,0 +1,6 @@
+apps/*
+config/*
+log/*
+temp/*
+ai-kb/*
+!.gitkeep

@@ -1,0 +1,3998 @@
+<?php
+
+namespace App\Http\Controllers\Api;
+
+use DB;
+use Request;
+use Redirect;
+use Cache;
+use Carbon\Carbon;
+use App\Tasks\PushTask;
+use App\Module\AI;
+use App\Module\Doo;
+use App\Models\File;
+use App\Models\User;
+use App\Models\UserBot;
+use App\Module\Base;
+use App\Module\Timer;
+use App\Models\Setting;
+use App\Module\Extranet;
+use App\Module\TimeRange;
+use App\Module\MsgTool;
+use App\Models\FileContent;
+use App\Models\ProjectTask;
+use App\Models\ProjectTaskUser;
+use App\Models\ProjectTaskVisibilityUser;
+use App\Models\ProjectUser;
+use App\Models\AbstractModel;
+use App\Models\WebSocketDialog;
+use App\Models\WebSocketDialogMsg;
+use App\Models\WebSocketDialogUser;
+use App\Models\WebSocketDialogConfig;
+use App\Models\WebSocketDialogMsgRead;
+use App\Models\WebSocketDialogMsgTodo;
+use App\Models\WebSocketDialogMsgTranslate;
+use App\Models\WebSocketDialogSession;
+use App\Models\UserRecentItem;
+use App\Module\Table\OnlineData;
+use App\Module\Manticore\ManticoreMsg;
+use Hhxsv5\LaravelS\Swoole\Task\Task;
+
+/**
+ * @apiDefine dialog
+ *
+ * 对话
+ */
+class DialogController extends AbstractController
+{
+    /**
+     * @api {get} api/dialog/lists 对话列表
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName lists
+     *
+     * @apiParam {String} [timerange]        时间范围（如：1678248944,1678248944）
+     * - 第一个时间: 读取在这个时间之后更新的数据
+     * - 第二个时间: 读取在这个时间之后删除的数据ID（第1页附加返回数据: deleted_id）
+     *
+     * @apiParam {Number} [page]            当前页，默认:1
+     * @apiParam {Number} [pagesize]        每页显示数量，默认:50，最大:100
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function lists()
+    {
+        $user = User::auth();
+        //
+        $timerange = TimeRange::parse(Request::input());
+        //
+        $data = WebSocketDialog::getDialogList($user->userid, $timerange->updated, $timerange->deleted);
+        //
+        return Base::retSuccess('success', $data);
+    }
+
+    /**
+     * @api {get} api/dialog/beyond 列表外对话
+     *
+     * @apiDescription 需要token身份，列表外的未读对话 和 列表外的待办对话
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName beyond
+     *
+     * @apiParam {String} unread_at         在这个时间之前未读的数据
+     * - 格式1：2021-01-01 00:00:00
+     * - 格式2：1612051200
+     * @apiParam {String} todo_at           在这个时间之前待办的数据
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function beyond()
+    {
+        $user = User::auth();
+        //
+        $unreadAt = Request::input('unread_at');
+        $todoAt = Request::input('todo_at');
+        //
+        $data = WebSocketDialog::getDialogBeyond($user->userid, Base::newCarbon($unreadAt), Base::newCarbon($todoAt));
+        //
+        return Base::retSuccess('success', $data);
+    }
+
+    /**
+     * @api {get} api/dialog/search 搜索会话
+     *
+     * @apiDescription 根据消息关键词搜索相关会话，需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName search
+     *
+     * @apiParam {String} key              搜索关键词
+     * @apiParam {String} [dialog_only]    仅搜索会话和联系人，不搜索消息内容（可选，传任意值启用）
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function search()
+    {
+        $user = User::auth();
+        //
+        $key = trim(Request::input('key'));
+        if (empty($key)) {
+            return Base::retError('请输入搜索关键词');
+        }
+        $dialogOnly = Request::exists('dialog_only');
+        // 搜索会话
+        $take = 20;
+        $list = WebSocketDialog::searchDialog($user->userid, $key, $take);
+        // 搜索联系人
+        if (count($list) < $take && Base::judgeClientVersion("0.21.60")) {
+            $users = User::select(User::$basicField)
+                ->searchByKeyword($key)
+                ->orderBy('userid')
+                ->take($take - count($list))
+                ->get();
+            $users->transform(function (User $item) use ($user) {
+                $id = 'u:' . $item->userid;
+                $lastAt = null;
+                $lastMsg = null;
+                $dialog = WebSocketDialog::getUserDialog($user->userid, $item->userid, now()->addDay());
+                if ($dialog) {
+                    $id = $dialog->id;
+                    $row = WebSocketDialogMsg::whereDialogId($dialog->id)->orderByDesc('id')->first();
+                    if ($row) {
+                        $lastAt = Carbon::parse($row->created_at)->toDateTimeString();
+                        $lastMsg = WebSocketDialog::lastMsgFormat($row->toArray());
+                    }
+                }
+                return [
+                    'id' => $id,
+                    'type' => 'user',
+                    'name' => $item->nickname,
+                    'dialog_user' => $item,
+                    'last_at' => $lastAt,
+                    'last_msg' => $lastMsg,
+                ];
+            });
+            $list = array_merge($list, $users->toArray());
+        }
+        // 搜索消息会话（仅当 dialog_only 未设置时）
+        if (!$dialogOnly && count($list) < $take) {
+            $searchResults = ManticoreMsg::searchDialogs($user->userid, $key, 0, $take - count($list));
+            if ($searchResults) {
+                foreach ($searchResults as $item) {
+                    if ($dialog = WebSocketDialog::find($item['id'])) {
+                        $dialog = array_merge($dialog->toArray(), $item);
+                        $list[] = WebSocketDialog::synthesizeData($dialog, $user->userid);
+                    }
+                }
+            }
+        }
+        //
+        return Base::retSuccess('success', $list);
+    }
+
+    /**
+     * @api {get} api/dialog/search/tag 搜索标注会话
+     *
+     * @apiDescription 根据消息关键词搜索相关会话，需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName search__tag
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function search__tag()
+    {
+        $user = User::auth();
+        // 搜索会话
+        $msgs = DB::table('web_socket_dialog_users as u')
+            ->select(['d.*', 'u.top_at', 'u.last_at', 'u.mark_unread', 'u.silence', 'u.hide', 'u.color', 'u.updated_at as user_at', 'm.id as search_msg_id'])
+            ->join('web_socket_dialogs as d', 'u.dialog_id', '=', 'd.id')
+            ->join('web_socket_dialog_msgs as m', 'm.dialog_id', '=', 'd.id')
+            ->where('u.userid', $user->userid)
+            ->whereNull('d.deleted_at')
+            ->where('m.tag', '>', 0)
+            ->orderByDesc('m.id')
+            ->take(50)
+            ->get()
+            ->map(function($item) use ($user) {
+                return WebSocketDialog::synthesizeData($item, $user->userid);
+            })
+            ->all();
+        //
+        return Base::retSuccess('success', $msgs);
+    }
+
+    /**
+     * @api {get} api/dialog/one 获取单个会话信息
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName one
+     *
+     * @apiParam {Number} dialog_id         对话ID
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function one()
+    {
+        $user = User::auth();
+        //
+        $dialog_id = intval(Request::input('dialog_id'));
+        //
+        $dialog = WebSocketDialog::checkDialog($dialog_id);
+        $data = WebSocketDialog::synthesizeData($dialog, $user->userid);
+        //
+        return Base::retSuccess('success', $data);
+    }
+
+    /**
+     * @api {get} api/dialog/user 获取会话成员
+     *
+     * @apiDescription  需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName user
+     *
+     * @apiParam {Number} dialog_id            会话ID
+     * @apiParam {Number} [getuser]            获取会员详情（1: 返回会员昵称、邮箱等基本信息，0: 默认不返回）
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function user()
+    {
+        User::auth();
+        //
+        $dialog_id = intval(Request::input('dialog_id'));
+        $getuser = intval(Request::input('getuser', 0));
+        //
+        $dialog = WebSocketDialog::checkDialog($dialog_id);
+        //
+        if ($getuser === 1) {
+            $data = $dialog->dialogUserBuilder()->get();
+            $array = array_filter($data->toArray(), function ($item) {
+                return $item['userid'] > 0;
+            });
+            foreach ($array as &$item) {
+                $item['online'] = $item['bot'] || OnlineData::live($item['userid']) > 0;
+            }
+        } else {
+            $data = WebSocketDialogUser::select(['web_socket_dialog_users.*', 'users.bot'])
+                ->join('users', 'web_socket_dialog_users.userid', '=', 'users.userid')
+                ->where('web_socket_dialog_users.dialog_id', $dialog_id)
+                ->whereNull('users.disable_at')
+                ->orderBy('web_socket_dialog_users.id')
+                ->get();
+            $array = $data->toArray();
+        }
+        return Base::retSuccess('success', $array);
+    }
+
+    /**
+     * @api {get} api/dialog/todo 获取会话待办
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName todo
+     *
+     * @apiParam {Number} [dialog_id]            会话ID
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function todo()
+    {
+        $user = User::auth();
+        //
+        $dialog_id = intval(Request::input('dialog_id'));
+        //
+        $builder = WebSocketDialogMsgTodo::whereUserid($user->userid)->whereDoneAt(null);
+        if ($dialog_id > 0) {
+            WebSocketDialog::checkDialog($dialog_id);
+            $builder->whereDialogId($dialog_id);
+        }
+        //
+        $list = $builder->orderByDesc('id')->take(50)->get();
+        return Base::retSuccess("success", $list);
+    }
+
+    /**
+     * @api {get} api/dialog/top 会话置顶
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName top
+     *
+     * @apiParam {Number} dialog_id            会话ID
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function top()
+    {
+        $user = User::auth();
+        $dialogId = intval(Request::input('dialog_id'));
+        $dialogUser = WebSocketDialogUser::whereUserid($user->userid)->whereDialogId($dialogId)->first();
+        if (!$dialogUser) {
+            return Base::retError("会话不存在");
+        }
+        $dialogUser->top_at = $dialogUser->top_at ? null : Carbon::now();
+        $dialogUser->save();
+        return Base::retSuccess("success", [
+            'id' => $dialogUser->dialog_id,
+            'top_at' => $dialogUser->top_at?->toDateTimeString(),
+        ]);
+    }
+
+    /**
+     * @api {get} api/dialog/hide 会话隐藏
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName hide
+     *
+     * @apiParam {Number} dialog_id            会话ID
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function hide()
+    {
+        $user = User::auth();
+        $dialogId = intval(Request::input('dialog_id'));
+        $dialogUser = WebSocketDialogUser::whereUserid($user->userid)->whereDialogId($dialogId)->first();
+        if (!$dialogUser) {
+            return Base::retError("会话不存在");
+        }
+        if ($dialogUser->top_at) {
+            return Base::retError("置顶会话无法隐藏");
+        }
+        $dialogUser->hide = 1;
+        $dialogUser->save();
+        return Base::retSuccess("success", [
+            'id' => $dialogUser->dialog_id,
+            'hide' => 1,
+        ]);
+    }
+
+    /**
+     * @api {get} api/dialog/tel 获取对方联系电话
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName tel
+     *
+     * @apiParam {Number} dialog_id            会话ID
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function tel()
+    {
+        $user = User::auth();
+        //
+        $dialog_id = intval(Request::input('dialog_id'));
+        //
+        $dialog = WebSocketDialog::checkDialog($dialog_id);
+        if ($dialog->type !== 'user') {
+            return Base::retError("会话类型错误");
+        }
+        $dialogUser = $dialog->dialogUserBuilder(['tel'])->where('users.userid', '!=', $user->userid)->first();
+        if (empty($dialogUser)) {
+            return Base::retError("会话对象不存在");
+        }
+        if (empty($dialogUser->tel)) {
+            return Base::retError("对方未设置联系电话");
+        }
+        if ($user->isTemp()) {
+            return Base::retError("无法查看联系电话");
+        }
+        //
+        $add = null;
+        $res = WebSocketDialogMsg::sendMsg(null, $dialog->id, 'notice', [
+            'notice' => $user->nickname . " 查看了 " . $dialogUser->nickname . " 的联系电话"
+        ]);
+        if (Base::isSuccess($res)) {
+            $add = $res['data'];
+        }
+        //
+        return Base::retSuccess("success", [
+            'tel' => $dialogUser->tel,
+            'add' => $add ?: null
+        ]);
+    }
+
+    /**
+     * @api {get} api/dialog/open/user 打开会话
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName open__user
+     *
+     * @apiParam {Number} userid         对话会员ID
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function open__user()
+    {
+        $user = User::auth();
+        //
+        $userid = intval(Request::input('userid'));
+        if (empty($userid)) {
+            return Base::retError('错误的会话');
+        }
+        //
+        $dialog = WebSocketDialog::checkUserDialog($user, $userid);
+        if (empty($dialog)) {
+            return Base::retError('打开会话失败');
+        }
+        $data = WebSocketDialog::synthesizeData($dialog->id, $user->userid);
+
+        return Base::retSuccess('success', $data);
+    }
+
+    /**
+     * @api {get} api/dialog/open/event 打开会话事件
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName open__event
+     *
+     * @apiParam {Number} dialog_id         对话ID
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function open__event()
+    {
+        $user = User::auth();
+        //
+        $dialog_id = intval(Request::input('dialog_id'));
+        //
+        $dialog = WebSocketDialog::checkDialog($dialog_id);
+        if (empty($dialog)) {
+            return Base::retError('打开会话失败');
+        }
+        //
+        Cache::remember("webhook_dialog_open_{$dialog->id}_{$user->userid}", Carbon::now()->addMinute(), function () use ($dialog, $user) {
+            $dialog->dispatchMemberWebhook(UserBot::WEBHOOK_EVENT_DIALOG_OPEN, $user->userid, $user->userid);
+            return true;
+        });
+        //
+        return Base::retSuccess('success');
+    }
+
+    /**
+     * @api {get} api/dialog/msg/list 获取消息列表
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__list
+     *
+     * @apiParam {Number} dialog_id         对话ID
+     * @apiParam {Number} [msg_id]          消息ID
+     * @apiParam {Number} [position_id]     此消息ID前后的数据
+     * @apiParam {Number} [prev_id]         此消息ID之前的数据
+     * @apiParam {Number} [next_id]         此消息ID之后的数据
+     * - position_id、prev_id、next_id 只有一个有效，优先循序为：position_id > prev_id > next_id
+     * @apiParam {String} [msg_type]        消息类型
+     * - tag: 标记
+     * - link: 链接
+     * - text: 文本
+     * - image: 图片
+     * - file: 文件
+     * - record: 录音
+     * - meeting: 会议
+     *
+     * @apiParam {Number} [take]            获取条数，默认:50，最大:100
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function msg__list()
+    {
+        $user = User::auth();
+        //
+        $dialog_id = intval(Request::input('dialog_id'));
+        $msg_id = intval(Request::input('msg_id'));
+        $position_id = intval(Request::input('position_id'));
+        $prev_id = intval(Request::input('prev_id'));
+        $next_id = intval(Request::input('next_id'));
+        $msg_type = trim(Request::input('msg_type'));
+        $take = Base::getPaginate(100, 50);
+        $data = [];
+        //
+        $dialog = WebSocketDialog::checkDialog($dialog_id);
+        $reDialog = true;
+        //
+        $builder = WebSocketDialogMsg::select([
+            'web_socket_dialog_msgs.*',
+            'read.mention',
+            'read.dot',
+            'read.read_at',
+        ])->leftJoin('web_socket_dialog_msg_reads as read', function ($leftJoin) use ($user) {
+            $leftJoin
+                ->on('read.userid', '=', DB::raw($user->userid))
+                ->on('read.msg_id', '=', 'web_socket_dialog_msgs.id');
+        })->where('web_socket_dialog_msgs.dialog_id', $dialog_id);
+        //
+        if ($dialog->session_id > 0) {
+            $builder->whereSessionId($dialog->session_id);
+        }
+        if ($msg_type) {
+            if ($msg_type === 'tag') {
+                $builder->where('tag', '>', 0);
+            } elseif ($msg_type === 'todo') {
+                $builder->where('todo', '>', 0);
+            } elseif ($msg_type === 'link') {
+                $builder->whereLink(1);
+            } elseif (in_array($msg_type, ['text', 'image', 'file', 'record', 'meeting'])) {
+                $builder->whereMtype($msg_type);
+            } else {
+                return Base::retError('参数错误');
+            }
+            $reDialog = false;
+        }
+        if ($msg_id > 0) {
+            $builder->whereReplyId($msg_id);
+            $reDialog = false;
+        }
+        //
+        if ($position_id > 0) {
+            $array = $builder->clone()
+                ->where('web_socket_dialog_msgs.id', '>=', $position_id)
+                ->orderBy('web_socket_dialog_msgs.id')
+                ->take(intval($take / 2))
+                ->get();
+            $prev_id = intval($array->last()?->id);
+        }
+        //
+        $cloner = $builder->clone();
+        if ($prev_id > 0) {
+            $cloner->where('web_socket_dialog_msgs.id', '<=', $prev_id)->orderByDesc('web_socket_dialog_msgs.id');
+            $reDialog = false;
+        } elseif ($next_id > 0) {
+            $cloner->where('web_socket_dialog_msgs.id', '>=', $next_id)->orderBy('web_socket_dialog_msgs.id');
+            $reDialog = false;
+        } else {
+            $cloner->orderByDesc('web_socket_dialog_msgs.id');
+        }
+        $list = $cloner->take($take)->get()->sortByDesc('id', SORT_NUMERIC)->values();
+        //
+        if ($list->isNotEmpty()) {
+            $list->transform(function (WebSocketDialogMsg $item) {
+                $item->todo_done = $item->isTodoDone();
+                $item->next_id = 0;
+                $item->prev_id = 0;
+                return $item;
+            });
+            $first = $list->first();
+            $first->next_id = intval($builder->clone()
+                ->where('web_socket_dialog_msgs.id', '>', $first->id)
+                ->orderBy('web_socket_dialog_msgs.id')
+                ->value('id'));
+            $last = $list->last();
+            $last->prev_id = intval($builder->clone()
+                ->where('web_socket_dialog_msgs.id', '<', $last->id)
+                ->orderByDesc('web_socket_dialog_msgs.id')
+                ->value('id'));
+        }
+        $data['list'] = $list;
+        $data['time'] = Timer::time();
+        // 记录当前打开的任务对话
+        if ($dialog->type == 'group' && $dialog->group_type == 'task') {
+            $user->task_dialog_id = $dialog->id;
+            $user->save();
+        }
+        // 去掉标记未读
+        $isMarkDialogUser = WebSocketDialogUser::whereDialogId($dialog->id)->whereUserid($user->userid)->whereMarkUnread(1)->first();
+        if ($isMarkDialogUser) {
+            $isMarkDialogUser->mark_unread = 0;
+            $isMarkDialogUser->save();
+        }
+        //
+        if ($reDialog) {
+            $data['dialog'] = WebSocketDialog::synthesizeData($dialog, $user->userid, true);
+            $data['todo'] = $data['dialog']['todo_num'] > 0 ? WebSocketDialogMsgTodo::whereDialogId($dialog->id)->whereUserid($user->userid)->whereDoneAt(null)->orderByDesc('id')->take(50)->get() : [];
+            $data['top'] = $dialog->top_msg_id ? WebSocketDialogMsg::whereId($dialog->top_msg_id)->first() : null;
+        }
+        return Base::retSuccess('success', $data);
+    }
+
+    /**
+     * @api {get} api/dialog/msg/latest 获取最新消息列表
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__latest
+     *
+     * @apiParam {Array} [dialogs]          对话ID列表
+     * - 格式：[{id:会话ID, latest_id:此消息ID之后的数据}, ...]
+     * @apiParam {Number} [take]            每个会话获取多少条，默认:25，最大:50
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function msg__latest()
+    {
+        if (!Base::judgeClientVersion('0.34.47')) {
+            return Base::retSuccess('success', ['data' => []]);
+        }
+        //
+        $user = User::auth();
+        //
+        $dialogs = Request::input('dialogs');
+        if (empty($dialogs) || !is_array($dialogs)) {
+            return Base::retError('参数错误');
+        }
+        $builder = WebSocketDialogMsg::select([
+            'web_socket_dialog_msgs.*',
+            'read.mention',
+            'read.dot',
+            'read.read_at',
+        ])->leftJoin('web_socket_dialog_msg_reads as read', function ($leftJoin) use ($user) {
+            $leftJoin
+                ->on('read.userid', '=', DB::raw($user->userid))
+                ->on('read.msg_id', '=', 'web_socket_dialog_msgs.id');
+        });
+        $data = [];
+        $num = 0;
+        foreach ($dialogs as $item) {
+            $dialog_id = intval($item['id']);
+            $latest_id = intval($item['latest_id']);
+            if ($dialog_id <= 0) {
+                continue;
+            }
+            if ($num >= 5) {
+                break;
+            }
+            $num++;
+            WebSocketDialog::checkDialog($dialog_id);
+            //
+            $cloner = $builder->clone();
+            $cloner->where('web_socket_dialog_msgs.dialog_id', $dialog_id);
+            if ($latest_id > 0) {
+                $cloner->where('web_socket_dialog_msgs.id', '>', $latest_id);
+            }
+            $cloner->orderByDesc('web_socket_dialog_msgs.id');
+            $list = $cloner->take(Base::getPaginate(50, 25, 'take'))->get();
+            if ($list->isNotEmpty()) {
+                $data = array_merge($data, $list->toArray());
+            }
+        }
+        return Base::retSuccess('success', compact('data'));
+    }
+
+    /**
+     * @api {get} api/dialog/msg/one 获取单条消息
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__one
+     *
+     * @apiParam {Number} msg_id            消息ID
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function msg__one()
+    {
+        User::auth();
+        //
+        $msg_id = intval(Request::input('msg_id'));
+        //
+        $msg = WebSocketDialogMsg::whereId($msg_id)->first();
+        if (empty($msg)) {
+            return Base::retError("消息不存在或已被删除");
+        }
+        WebSocketDialog::checkDialog($msg->dialog_id);
+        //
+        return Base::retSuccess('success', $msg);
+    }
+
+    /**
+     * @api {get} api/dialog/msg/dot 聊天消息去除点
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__dot
+     *
+     * @apiParam {Number} id         消息ID
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function msg__dot()
+    {
+        $user = User::auth();
+        //
+        $id = intval(Request::input('id'));
+        //
+        $msg = WebSocketDialogMsg::find($id);
+        if (empty($msg)) {
+            return Base::retError("消息不存在或已被删除");
+        }
+        //
+        WebSocketDialogMsgRead::whereMsgId($id)->whereUserid($user->userid)->change(['dot' => 0]);
+        //
+        return Base::retSuccess('success', [
+            'id' => $msg->id,
+            'dot' => 0,
+        ]);
+    }
+
+    /**
+     * @api {get} api/dialog/msg/read 已读聊天消息
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__read
+     *
+     * @apiParam {Object} id         消息ID（组）
+     * - 1、多个ID用逗号分隔，如：1,2,3
+     * - 2、另一种格式：{"id": "会话ID|0"}，如：{"2": 0, "3": 10}
+     * -- 会话ID：标记id之后的消息已读
+     * -- 其他：标记已读
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function msg__read()
+    {
+        $user = User::auth();
+        //
+        $id = Request::input('id');
+        $ids = $id && is_array($id) ? $id : array_fill_keys(Base::explodeInt($id), 'r');
+        //
+        $dialogIds = [];
+        $markIds = [];
+        WebSocketDialogMsg::whereIn('id', array_keys($ids))->chunkById(100, function($list) use ($ids, $user, &$dialogIds, &$markIds) {
+            /** @var WebSocketDialogMsg $item */
+            foreach ($list as $item) {
+                $item->readSuccess($user->userid);
+                $dialogIds[$item->dialog_id] = $item->dialog_id;
+                if ($ids[$item->id] == $item->dialog_id) {
+                    $markIds[$item->dialog_id] = min($item->id, $markIds[$item->dialog_id] ?? 0);
+                }
+            }
+        });
+        //
+        foreach ($markIds as $dialogId => $msgId) {
+            WebSocketDialogMsgRead::whereDialogId($dialogId)
+                ->whereUserid($user->userid)
+                ->whereReadAt(null)
+                ->where('msg_id', '>=', $msgId)
+                ->chunkById(100, function ($list) {
+                    WebSocketDialogMsgRead::onlyMarkRead($list);
+                });
+        }
+        //
+        $data = [];
+        $dialogUsers = WebSocketDialogUser::with(['webSocketDialog'])->whereUserid($user->userid)->whereIn('dialog_id', array_values($dialogIds))->get();
+        foreach ($dialogUsers as $dialogUser) {
+            if (!$dialogUser->webSocketDialog) {
+                continue;
+            }
+            $dialogUser->updated_at = Carbon::now();
+            $dialogUser->save();
+            //
+            $unreadData = WebSocketDialog::generateUnread($dialogUser->dialog_id, $user->userid);
+            $data[] = [
+                'id' => $dialogUser->dialog_id,
+                'unread' => $unreadData['unread'],
+                'unread_one' => $unreadData['unread_one'],
+                'mention' => $unreadData['mention'],
+                'mention_ids' => $unreadData['mention_ids'],
+                'user_at' =>  Carbon::parse($dialogUser->updated_at)->toDateTimeString('millisecond'),
+                'user_ms' => Carbon::parse($dialogUser->updated_at)->valueOf()
+            ];
+        }
+        return Base::retSuccess('success', $data);
+    }
+
+    /**
+     * @api {get} api/dialog/msg/unread 获取未读消息数据
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__unread
+     *
+     * @apiParam {Number} dialog_id         对话ID
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     * @apiSuccessExample {json} data:
+    {
+        "id": 43,
+        "unread": 308,
+        "mention": 11,
+        "user_at": "2020-12-12 00:00:00.000",
+        "user_ms": 1677558147167,
+    }
+     */
+    public function msg__unread()
+    {
+        $dialog_id = intval(Request::input('dialog_id'));
+        //
+        $dialogUser = WebSocketDialogUser::with(['webSocketDialog'])->whereDialogId($dialog_id)->whereUserid(User::userid())->first();
+        if (empty($dialogUser?->webSocketDialog)) {
+            return Base::retError('会话不存在');
+        }
+        $unreadData = WebSocketDialog::generateUnread($dialog_id, $dialogUser->userid);
+        //
+        return Base::retSuccess('success', [
+            'id' => $dialog_id,
+            'unread' => $unreadData['unread'],
+            'unread_one' => $unreadData['unread_one'],
+            'mention' => $unreadData['mention'],
+            'mention_ids' => $unreadData['mention_ids'],
+            'user_at' => Carbon::parse($dialogUser->updated_at)->toDateTimeString('millisecond'),
+            'user_ms' => Carbon::parse($dialogUser->updated_at)->valueOf()
+        ]);
+    }
+
+    /**
+     * @api {get} api/dialog/msg/checked 设置消息checked
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__checked
+     *
+     * @apiParam {Number} dialog_id         对话ID
+     * @apiParam {Number} msg_id            消息ID
+     * @apiParam {Number} index             li 位置
+     * @apiParam {Number} checked           标记、取消标记
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     * @apiSuccessExample {json} data:
+    {
+        "id": 43,
+        "msg": {
+            // ....
+        },
+    }
+     */
+    public function msg__checked()
+    {
+        $user = User::auth();
+        //
+        $dialog_id = intval(Request::input('dialog_id'));
+        $msg_id = intval(Request::input('msg_id'));
+        $index = intval(Request::input('index'));
+        $checked = intval(Request::input('checked'));
+        //
+        $dialogMsg = WebSocketDialogMsg::whereId($msg_id)->whereDialogId($dialog_id)->first();
+        if (empty($dialogMsg)) {
+            return Base::retError('消息不存在');
+        }
+        if ($dialogMsg->userid != $user->userid) {
+            return Base::retError('仅支持修改自己的消息');
+        }
+        if ($dialogMsg->type !== 'text') {
+            return Base::retError('仅支持文本消息');
+        }
+        //
+        $oldMsg = Base::json2array($dialogMsg->getRawOriginal('msg'));
+        $oldText = $oldMsg['text'] ?? '';
+        $newText = preg_replace_callback('/<li[^>]*>/i', function ($matches) use ($index, $checked) {
+            static $i = 0;
+            if ($i++ == $index) {
+                $checked = $checked ? 'checked' : 'unchecked';
+                return '<li data-list="' . $checked . '">';
+            }
+            return $matches[0];
+        }, $oldText);
+        //
+        $dialogMsg->updateInstance([
+            'msg' => array_merge($oldMsg, ['text' => $newText]),
+        ]);
+        $dialogMsg->save();
+        //
+        return Base::retSuccess('success', [
+            'id' => $dialogMsg->id,
+            'msg' => $dialogMsg->msg,
+        ]);
+    }
+
+    /**
+     * @api {post} api/dialog/msg/stream 通知成员监听消息
+     *
+     * @apiDescription 通知指定会员EventSource监听流动消息
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__stream
+     *
+     * @apiParam {Number} userid         通知会员ID
+     * @apiParam {String} stream_url     流动消息地址
+     * @apiParam {String} [source]       消息来源
+     *  - api: 默认
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function msg__stream()
+    {
+        $userid = intval(Request::input('userid'));
+        $stream_url = trim(Request::input('stream_url'));
+        $source = trim(Request::input('source', 'api'));
+        //
+        if ($userid <= 0) {
+            return Base::retError('参数错误');
+        }
+        //
+        if ($source === 'ai') {
+            $stream_url = '/ai' . preg_replace('/^\/ai\/?/', '/', $stream_url);
+        }
+        //
+        $params = [
+            'userid' => $userid,
+            'msg' => [
+                'type' => 'msgStream',
+                'stream_url' => $stream_url,
+            ]
+        ];
+        $task = new PushTask($params, false);
+        Task::deliver($task);
+        //
+        return Base::retSuccess('success');
+    }
+
+    /**
+     * 使用 AI 助手生成消息
+     *
+     * @deprecated 已废弃方法，仅保留路由占位，后续版本中移除
+     */
+    public function msg__ai_generate()
+    {
+        Base::checkClientVersion('1.4.35');
+    }
+
+    /**
+     * @api {post} api/dialog/msg/sendtext 发送消息
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__sendtext
+     *
+     * @apiParam {Number} dialog_id         对话ID（存在dialog_ids时无效）
+     * @apiParam {String} [dialog_ids]      对话ID列表，多个对话ID用逗号分隔
+     * @apiParam {String} text              消息内容
+     * @apiParam {String} [key]             搜索关键词 (不设置根据内容自动生成)
+     * @apiParam {String} [text_type]       消息类型
+     * - html: HTML（默认）
+     * - md: MARKDOWN
+     * @apiParam {Number} [update_id]       更新消息ID（优先大于 reply_id）
+     * @apiParam {String} [update_mark]     是否更新标记
+     * - no: 不标记（仅机器人支持）
+     * - yes: 标记（默认）
+     * @apiParam {Number} [reply_id]        回复ID
+     * @apiParam {String} [reply_check]     配合 reply_id 使用，判断是否需要验证回复ID的有效性
+     * - no: 不进行判断，直接使用提供的 reply_id（默认）
+     * - yes: 进行判断，如果 reply_id 到最新消息都没有会员发的消息，则 reply_id 无效
+     * @apiParam {String} [silence]         是否静默发送
+     * - no: 正常发送（默认）
+     * - yes: 静默发送
+     * @apiParam {String} [model_name]      模型名称（仅AI机器人支持）
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function msg__sendtext()
+    {
+        $user = User::auth();
+        $user->checkChatInformation();
+        //
+        $dialog_id = intval(Request::input('dialog_id'));
+        $dialog_ids = trim(Request::input('dialog_ids'));
+        $update_id = intval(Request::input('update_id'));
+        $update_mark = !($user->bot && in_array(strtolower(trim(Request::input('update_mark'))), ['no', 'false', '0']));
+        $reply_id = intval(Request::input('reply_id'));
+        $reply_check = trim(Request::input('reply_check'));
+        $text = trim(Request::input('text'));
+        $key = trim(Request::input('key'));
+        $text_type = strtolower(trim(Request::input('text_type')));
+        $silence = in_array(strtolower(trim(Request::input('silence'))), ['yes', 'true', '1']);
+        $model_name = trim(Request::input('model_name'));
+        $markdown = in_array($text_type, ['md', 'markdown']);
+        //
+        $result = [];
+        $dialogIds = $dialog_ids ? explode(',', $dialog_ids) : [$dialog_id ?: 0];
+        foreach ($dialogIds as $dialog_id) {
+            //
+            $dialog = WebSocketDialog::checkDialog($dialog_id);
+            //
+            if ($update_id > 0) {
+                $action = $update_mark ? "update-$update_id" : "change-$update_id";
+                if (!$user->bot && !$dialog->isSelfDialog()) {
+                    Setting::validateMsgLimit('edit', $update_id);
+                }
+            } elseif ($reply_id > 0) {
+                $action = "reply-$reply_id";
+                if ($reply_check === 'yes') {
+                    $exisUserMsg = WebSocketDialogMsg::whereDialogId($dialog_id)
+                        ->where('id', '>', $reply_id)
+                        ->whereBot(0)
+                        ->whereNotIn('type', ['notice', 'template'])
+                        ->exists();
+                    if (!$exisUserMsg) {
+                        $action = "";
+                    }
+                }
+            } else {
+                $action = "";
+            }
+            //
+            if (!$markdown) {
+                $text = WebSocketDialogMsg::formatMsg($text, $dialog_id);
+            }
+            $strlen = mb_strlen($text);
+            $reallen = mb_strlen(preg_replace("/<img[^>]*?>/i", "", $text));
+            if ($strlen < 1) {
+                return Base::retError('消息内容不能为空');
+            }
+            if ($reallen > 200000) {
+                return Base::retError('消息内容最大不能超过200000字');
+            }
+            if ($reallen > 5000) {
+                // 内容过长转成文件发送
+                $path = "uploads/chat/" . date("Ym") . "/" . $dialog_id . "/";
+                Base::makeDir(public_path($path));
+                $path = $path . md5($text) . ".htm";
+                $file = public_path($path);
+                file_put_contents($file, $text);
+                $size = filesize(public_path($path));
+                if (empty($size)) {
+                    return Base::retError('消息发送保存失败');
+                }
+                $type = $markdown ? 'md' : 'htm';
+                $desc = $text;
+                if ($markdown) {
+                    $desc = preg_replace("/:::\s*reasoning[\s\S]*?:::/", "", $desc);
+                    $desc = Base::markdown2html($desc);
+                }
+                $desc = strip_tags($desc);
+                $desc = mb_substr(WebSocketDialogMsg::filterEscape($desc), 0, 200);
+                $text = MsgTool::truncateText($text, 500, $type);
+                $msgData = [
+                    'type' => $type,    // 内容类型
+                    'desc' => $desc,    // 描述内容
+                    'text' => $text,    // 简要内容
+                    'file' => [
+                        'name' => "LongText-{$strlen}.{$type}",
+                        'size' => $size,
+                        'file' => $file,
+                        'path' => $path,
+                        'url' => Base::fillUrl($path),
+                        'thumb' => '',
+                        'width' => -1,
+                        'height' => -1,
+                        'ext' => $type,
+                    ],
+                ];
+                if (empty($key)) {
+                    $key = $desc;
+                }
+                if ($model_name) {
+                    $msgData['model_name'] = $model_name;
+                }
+                $result = WebSocketDialogMsg::sendMsg($action, $dialog_id, 'longtext', $msgData, $user->userid, false, false, $silence, $key);
+            } else {
+                $msgData = ['text' => $text];
+                if ($markdown) {
+                    $msgData['type'] = 'md';
+                }
+                if ($model_name) {
+                    $msgData['model_name'] = $model_name;
+                }
+                $result = WebSocketDialogMsg::sendMsg($action, $dialog_id, 'text', $msgData, $user->userid, false, false, $silence, $key);
+            }
+        }
+        return $result;
+    }
+
+    /**
+     * @api {post} api/dialog/msg/sendnotice 发送通知
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__sendnotice
+     *
+     * @apiParam {Number} dialog_id         对话ID（存在dialog_ids时无效）
+     * @apiParam {String} [dialog_ids]      对话ID列表，多个对话ID用逗号分隔
+     * @apiParam {String} notice            通知内容（最长500字）
+     * @apiParam {String} [silence]         是否静默发送
+     * - no: 正常发送（默认）
+     * - yes: 静默发送
+     * @apiParam {String} [source]          消息来源
+     *  - api: 默认
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function msg__sendnotice()
+    {
+        $user = User::auth();
+        $user->checkChatInformation();
+        //
+        $dialog_id = intval(Request::input('dialog_id'));
+        $dialog_ids = trim(Request::input('dialog_ids'));
+        $notice = trim(Request::input('notice'));
+        $silence = in_array(strtolower(trim(Request::input('silence'))), ['yes', 'true', '1']);
+        $source = trim(Request::input('source', 'api'));
+        //
+        $strlen = mb_strlen($notice);
+        if ($strlen < 1) {
+            return Base::retError('通知内容不能为空');
+        }
+        if ($strlen > 500) {
+            return Base::retError('通知内容最大不能超过500字');
+        }
+        //
+        $result = [];
+        $dialogIds = $dialog_ids ? explode(',', $dialog_ids) : [$dialog_id ?: 0];
+        foreach ($dialogIds as $dialog_id) {
+            WebSocketDialog::checkDialog($dialog_id);
+            //
+            $result = WebSocketDialogMsg::sendMsg(null, $dialog_id, 'notice', [
+                'notice' => $notice,
+                'source' => $source
+            ], $user->userid, false, false, $silence);
+        }
+        return $result;
+    }
+
+    /**
+     * @api {post} api/dialog/msg/sendtemplate 发送模板消息
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__sendtemplate
+     *
+     * @apiParam {Number} dialog_id         对话ID（存在dialog_ids时无效）
+     * @apiParam {String} [dialog_ids]      对话ID列表，多个对话ID用逗号分隔
+     * @apiParam {String} content           模板消息（JSON格式）
+     * - 格式：[{content:内容(最长300个字), style:样式(最长300个字)}, ...]
+     * @apiParam {String} [title]           模板标题（留空从模板消息第一个内容提取）
+     * @apiParam {String} [silence]         是否静默发送
+     * - no: 正常发送（默认）
+     * - yes: 静默发送
+     * @apiParam {String} [source]          消息来源
+     *  - api: 默认
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function msg__sendtemplate()
+    {
+        $user = User::auth();
+        $user->checkChatInformation();
+        //
+        $dialog_id = intval(Request::input('dialog_id'));
+        $dialog_ids = trim(Request::input('dialog_ids'));
+        $content = Base::json2array(Request::input('content'));
+        $title = trim(Request::input('title'));
+        $silence = in_array(strtolower(trim(Request::input('silence'))), ['yes', 'true', '1']);
+        $source = trim(Request::input('source', 'api'));
+        //
+        if (empty($content)) {
+            return Base::retError('模板内容不能为空');
+        }
+        foreach ($content as $item) {
+            $contentLength = mb_strlen($item['content']);
+            if ($contentLength < 1) {
+                return Base::retError('模板消息内容至少需要1个字');
+            }
+            if ($contentLength > 300) {
+                return Base::retError('模板消息内容最多不能超过300个字');
+            }
+            if (mb_strlen($item['style']) > 300) {
+                return Base::retError('模板消息样式过长');
+            }
+            if (empty($title)) {
+                $title = Base::cutStr($item['content'], 50);
+            }
+        }
+        //
+        $result = [];
+        $dialogIds = $dialog_ids ? explode(',', $dialog_ids) : [$dialog_id ?: 0];
+        foreach ($dialogIds as $dialog_id) {
+            WebSocketDialog::checkDialog($dialog_id);
+            //
+            $result = WebSocketDialogMsg::sendMsg(null, $dialog_id, 'template', [
+                'type' => 'content',
+                'title' => $title,
+                'content' => $content,
+                'source' => $source
+            ], $user->userid, false, false, $silence);
+        }
+        return $result;
+    }
+
+    /**
+     * @api {post} api/dialog/msg/sendapprove 发送审批通知卡片
+     *
+     * @apiDescription 需要token身份。以「审批助手」机器人身份向指定用户发送审批模板卡片
+     * （由 approve 插件调用，卡片仅展示、不与旧审批系统有数据关联）。
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__sendapprove
+     *
+     * @apiParam {Number} to_userid     接收用户ID
+     * @apiParam {String} type          卡片类型：approve_reviewer / approve_notifier / approve_submitter / approve_comment_notifier
+     * @apiParam {String} [action]      动作：start / pass / refuse / withdraw（按类型取用）
+     * @apiParam {Number} [is_finished] 是否已结束（0/1）
+     * @apiParam {Object} data          卡片数据
+     * @apiParam {String} [title]       消息标题（会话列表预览用）
+     */
+    public function msg__sendapprove()
+    {
+        $user = User::auth();
+        $toUserid = intval(Request::input('to_userid'));
+        $type = trim(Request::input('type'));
+        $action = trim(Request::input('action'));
+        $isFinished = intval(Request::input('is_finished'));
+        $data = Base::json2array(Request::input('data'));
+        $title = trim(Request::input('title'));
+        //
+        $allow = ['approve_reviewer', 'approve_notifier', 'approve_submitter', 'approve_comment_notifier'];
+        if ($toUserid <= 0 || !in_array($type, $allow)) {
+            return Base::retError('参数错误');
+        }
+        $botUser = User::botGetOrCreate('approval-alert');
+        $dialog = WebSocketDialog::checkUserDialog($botUser, $toUserid);
+        if (empty($dialog)) {
+            return Base::retError('无法创建对话');
+        }
+        $msgData = [
+            'type' => $type,
+            'action' => $action ?: null,
+            'is_finished' => $isFinished,
+            'data' => $data,
+            'title' => $title,
+        ];
+        return WebSocketDialogMsg::sendMsg(null, $dialog->id, 'template', $msgData, $botUser->userid, false, false, true);
+    }
+
+    /**
+     * @api {post} api/dialog/msg/sendrecord 发送语音
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__sendrecord
+     *
+     * @apiParam {Number} dialog_id             对话ID
+     * @apiParam {Number} [reply_id]            回复ID
+     * @apiParam {String} base64                语音base64
+     * @apiParam {Number} duration              语音时长（毫秒）
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function msg__sendrecord()
+    {
+        $user = User::auth();
+        $user->checkChatInformation();
+        //
+        $dialog_id = intval(Request::input('dialog_id'));
+        $reply_id = intval(Request::input('reply_id'));
+        //
+        WebSocketDialog::checkDialog($dialog_id);
+        //
+        $action = $reply_id > 0 ? "reply-$reply_id" : "";
+        $path = "uploads/chat/" . date("Ym") . "/" . $dialog_id . "/";
+        $base64 = Request::input('base64');
+        $duration = intval(Request::input('duration'));
+        if ($duration < 600) {
+            return Base::retError('说话时间太短');
+        }
+        $data = Base::record64save([
+            "base64" => $base64,
+            "path" => $path,
+        ]);
+        if (Base::isError($data)) {
+            return Base::retError($data['msg']);
+        } else {
+            $recordData = $data['data'];
+            $recordData['size'] *= 1024;
+            $recordData['duration'] = $duration;
+            return WebSocketDialogMsg::sendMsg($action, $dialog_id, 'record', $recordData, $user->userid);
+        }
+    }
+
+    /**
+     * @api {post} api/dialog/msg/convertrecord 录音转文字
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__convertrecord
+     *
+     * @apiParam {String} base64                语音base64
+     * @apiParam {Number} duration              语音时长（毫秒）
+     * @apiParam {Number} [dialog_id]           会话ID，用于获取上下文提高识别准确率
+     * @apiParam {String} [translate]           翻译识别结果
+     * - 比如：zh
+     * - 默认：不翻译结果
+     * - 格式：符合 ISO_639 标准
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function msg__convertrecord()
+    {
+        $user = User::auth();
+        $user->checkChatInformation();
+        //
+        $path = "uploads/tmp/chat/" . date("Ym") . "/" . $user->userid . "/";
+        $base64 = Request::input('base64');
+        $translate = Request::input('translate');
+        $duration = intval(Request::input('duration'));
+        $dialogId = intval(Request::input('dialog_id'));
+        if ($duration < 600) {
+            return Base::retError('说话时间太短');
+        }
+        // 保存录音
+        $data = Base::record64save([
+            "base64" => $base64,
+            "path" => $path,
+        ]);
+        if (Base::isError($data)) {
+            return Base::retError($data['msg']);
+        }
+        $recordData = $data['data'];
+        // 构建上下文提示词
+        $promptParts = [];
+        if ($user->lang === 'zh') {
+            $promptParts[] = "如果识别到中文，优先使用简体中文输出";
+        } elseif ($user->lang === 'zh-CHT') {
+            $promptParts[] = "如果識別到中文，優先使用繁體中文輸出";
+        }
+        // 获取最近的聊天上下文
+        if ($dialogId > 0) {
+            $contextTexts = WebSocketDialogMsg::whereDialogId($dialogId)
+                ->whereIn('type', ['text'])
+                ->orderByDesc('id')
+                ->limit(5)
+                ->get()
+                ->reverse()
+                ->map(fn($msg) => $msg->extractMessageContent(100))
+                ->filter()
+                ->values()
+                ->toArray();
+            if (!empty($contextTexts)) {
+                $promptParts[] = "对话上下文：" . implode("；", $contextTexts) . "。";
+            }
+        }
+        // 转文字
+        $extParams = [];
+        if (!empty($promptParts)) {
+            $extParams['prompt'] = implode("\n\n", $promptParts);
+        }
+        $result = AI::transcriptions($recordData['file'], $extParams);
+        if (Base::isError($result)) {
+            return $result;
+        }
+        if (strlen($result['data']['text']) < 1) {
+            return Base::retError('转文字失败');
+        }
+        // 不翻译
+        if (!$translate) {
+            return Base::retSuccess('success', $result['data']['text']);
+        }
+        // 需要翻译
+        $result = AI::translations($result['data']['text'], Doo::getLanguages($translate));
+        if (Base::isError($result)) {
+            return $result;
+        }
+        return Base::retSuccess('success', $result['data']['translated_text']);
+    }
+
+    /**
+     * @api {post} api/dialog/msg/sendfile 文件上传
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__sendfile
+     *
+     * @apiParam {Number} dialog_id             对话ID
+     * @apiParam {Number} [reply_id]            回复ID
+     * @apiParam {Number} [image_attachment]    图片是否也存到附件
+     * @apiParam {String} [filename]            post-文件名称
+     * @apiParam {String} [image64]             post-base64图片（二选一）
+     * @apiParam {File} [files]                 post-文件对象（二选一）
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function msg__sendfile()
+    {
+        $user = User::auth();
+        //
+        $dialogIds = [intval(Request::input('dialog_id'))];
+        $replyId = intval(Request::input('reply_id'));
+        $imageAttachment = intval(Request::input('image_attachment'));
+        $files = Request::file('files');
+        $image64 = Request::input('image64');
+        $fileName = Request::input('filename');
+        return WebSocketDialog::sendMsgFiles($user, $dialogIds, $files, $image64, $fileName, $replyId, $imageAttachment);
+    }
+
+    /**
+     * @api {post} api/dialog/msg/sendfiles 群发文件上传
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__sendfile
+     *
+     * @apiParam {String} user_ids              用户ID
+     * @apiParam {String} dialog_ids            对话ID（user_ids 二选一）
+     * @apiParam {Number} [reply_id]            回复ID
+     * @apiParam {Number} [image_attachment]    图片是否也存到附件
+     * @apiParam {String} [filename]            post-文件名称
+     * @apiParam {String} [image64]             post-base64图片（二选一）
+     * @apiParam {File} [files]                 post-文件对象（二选一）
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function msg__sendfiles()
+    {
+        $user = User::auth();
+        //
+        $files = Request::file('files');
+        $image64 = Request::input('image64');
+        $fileName = Request::input('filename');
+        $replyId = intval(Request::input('reply_id'));
+        $imageAttachment = intval(Request::input('image_attachment'));
+        //
+        $dialogIds = trim(Request::input('dialog_ids'));
+        if ($dialogIds) {
+            $dialogIds = explode(',', $dialogIds);
+        } else {
+            $dialogIds = [];
+        }
+        // 用户
+        $userIds = trim(Request::input('user_ids'));
+        if ($userIds) {
+            $userIds = explode(',', $userIds);
+            foreach ($userIds as $userId) {
+                $dialog = WebSocketDialog::checkUserDialog($user, $userId);
+                if (empty($dialog)) {
+                    return Base::retError('打开会话失败');
+                }
+                $dialogIds[] = $dialog->id;
+            }
+        }
+        //
+        if (empty($dialogIds)) {
+            return Base::retError('找不到会话');
+        }
+        //
+        return WebSocketDialog::sendMsgFiles($user, $dialogIds, $files, $image64, $fileName, $replyId, $imageAttachment);
+    }
+
+    /**
+     * @api {get} api/dialog/msg/sendfileid 通过文件ID发送文件
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__sendfileid
+     *
+     * @apiParam {Number} file_id           消息ID
+     * @apiParam {Array} dialogids          转发给的对话ID
+     * @apiParam {Array} userids            转发给的成员ID
+     * @apiParam {String} leave_message     转发留言
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function msg__sendfileid()
+    {
+        $user = User::auth();
+        //
+        $file_id = intval(Request::input("file_id"));
+        $dialogids = Request::input('dialogids');
+        $userids = Request::input('userids');
+        $leave_message = Request::input('leave_message');
+        //
+        if (empty($dialogids) && empty($userids)) {
+            return Base::retError("请选择对话或成员");
+        }
+        //
+        $file = File::permissionFind($file_id, $user);
+        $fileLink = $file->getShareLink($user->userid);
+        $fileMsg = "<p><a class=\"mention file\" href=\"{{RemoteURL}}single/file/{$fileLink['code']}\" target=\"_blank\">~{$file->getNameAndExt()}</a></p>";
+        if ($leave_message) {
+            $fileMsg .= "<p>{$leave_message}</p>";
+        }
+        //
+        return WebSocketDialogMsg::sendMsgBatch($user, $userids, $dialogids, $fileMsg);
+    }
+
+    /**
+     * @api {get} api/dialog/msg/sendtaskid 通过任务ID发送任务
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__sendtaskid
+     *
+     * @apiParam {Number} task_id           消息ID
+     * @apiParam {Array} dialogids          转发给的对话ID
+     * @apiParam {Array} userids            转发给的成员ID
+     * @apiParam {String} leave_message     转发留言
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function msg__sendtaskid()
+    {
+        $user = User::auth();
+        //
+        $task_id = intval(Request::input("task_id"));
+        $dialogids = Request::input('dialogids');
+        $userids = Request::input('userids');
+        $leave_message = Request::input('leave_message');
+        //
+        if (empty($dialogids) && empty($userids)) {
+            return Base::retError("请选择对话或成员");
+        }
+        //
+        $task = ProjectTask::userTask($task_id, null);
+        $taskMsg = "<p><span class=\"mention task\" data-id=\"{$task_id}\">#{$task->name}</span></p>";
+        if ($leave_message) {
+            $taskMsg .= "<p>{$leave_message}</p>";
+        }
+        //
+        return WebSocketDialogMsg::sendMsgBatch($user, $userids, $dialogids, $taskMsg);
+    }
+
+    /**
+     * @api {post} api/dialog/msg/sendanon 发送匿名消息
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__sendanon
+     *
+     * @apiParam {Number} userid            对方会员ID
+     * @apiParam {String} text              消息内容
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function msg__sendanon()
+    {
+        User::auth();
+        //
+        $userid = intval(Request::input('userid'));
+        $text = trim(Request::input('text'));
+        //
+        $anonMessage = Base::settingFind('system', 'anon_message', 'open');
+        if ($anonMessage != 'open') {
+            return Base::retError("匿名消息功能暂停使用");
+        }
+        //
+        $toUser = User::whereUserid($userid)->first();
+        if (empty($toUser) || $toUser->bot) {
+            return Base::retError("匿名消息仅允许发送给个人");
+        }
+        if ($toUser->isDisable()) {
+            return Base::retError("对方已离职");
+        }
+        $strlen = mb_strlen($text);
+        if ($strlen < 1) {
+            return Base::retError('消息内容不能为空');
+        }
+        if ($strlen > 2000) {
+            return Base::retError('消息内容最大不能超过2000字');
+        }
+        //
+        $botUser = User::botGetOrCreate('anon-msg');
+        if (empty($botUser)) {
+            return Base::retError('匿名机器人不存在');
+        }
+        $dialog = WebSocketDialog::checkUserDialog($botUser, $toUser->userid);
+        if (empty($dialog)) {
+            return Base::retError('匿名机器人会话不存在');
+        }
+        return WebSocketDialogMsg::sendMsg(null, $dialog->id, 'template', [
+            'type' => 'content',
+            'content' => $text,
+        ], $botUser->userid, true);
+    }
+
+    /**
+     * @api {post} api/dialog/msg/sendbot 发送机器人消息
+     *
+     * @apiDescription 需要token身份，通过机器人发送消息给指定用户
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__sendbot
+     *
+     * @apiParam {Number} userid            对方会员ID
+     * @apiParam {String} text              消息内容，markdown格式
+     * @apiParam {String} [bot_type]        机器人类型
+     * - system-msg: 系统消息（默认）
+     * - task-alert: 任务提醒
+     * - check-in: 签到打卡
+     * - approval-alert: 审批
+     * - meeting-alert: 会议通知
+     * - xxxxxx: 其他机器人，xxxxxx 是任意6-20个字符串（如果不存在，则自动创建）
+     * @apiParam {String} [bot_name]        机器人名称（bot_type 为 xxxxxx 时有效）
+     * @apiParam {Boolean} [silence]        静默发送
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function msg__sendbot()
+    {
+        $user = User::auth();
+        //
+        $userid = intval(Request::input('userid'));
+        $text = trim(Request::input('text'));
+        $botType = trim(Request::input('bot_type', 'system-msg'));
+        $botName = trim(Request::input('bot_name'));
+        $silence = Request::input('silence', false);
+        //
+        $toUser = User::whereUserid($userid)->first();
+        if (empty($toUser) || $toUser->bot) {
+            return Base::retError("机器人消息仅允许发送给个人");
+        }
+        if ($toUser->isDisable()) {
+            return Base::retError("对方已离职");
+        }
+        $strlen = mb_strlen($text);
+        if ($strlen < 1) {
+            return Base::retError('消息内容不能为空');
+        }
+        if ($strlen > 2000) {
+            return Base::retError('消息内容最大不能超过2000字');
+        }
+        //
+        $botUpdate = [];
+        if (!in_array($botType, [
+            'system-msg',
+            'task-alert',
+            'todo-alert',
+            'check-in',
+            'approval-alert',
+            'meeting-alert',
+            'bot-manager',
+        ])) {
+            if (strlen($botType) < 6 || strlen($botType) > 20) {
+                return Base::retError("机器人类型由6-20个字符组成。");
+            }
+            if ($botName && (strlen($botName) < 2 || strlen($botName) > 20)) {
+                return Base::retError("机器人名称由2-20个字符组成。");
+            }
+            $botType = 'user-auto-' . $botType;
+            $botUpdate['nickname'] = $botName;
+        }
+        $botUser = User::botGetOrCreate($botType, $botUpdate, $user->userid);
+        if (empty($botUser)) {
+            return Base::retError('机器人不存在');
+        }
+        $dialog = WebSocketDialog::checkUserDialog($botUser, $toUser->userid);
+        if (empty($dialog)) {
+            return Base::retError('机器人会话不存在');
+        }
+        $msgData = [
+            'type' => 'md',
+            'text' => $text,
+        ];
+        return WebSocketDialogMsg::sendMsg(null, $dialog->id, 'text', $msgData, $botUser->userid, false, false, $silence);
+    }
+
+    /**
+     * @api {post} api/dialog/msg/send_ai_assistant          以AI助手身份发送消息到对话
+     *
+     * @apiDescription 需要token身份，以AI助手身份(userid=-1)发送消息到对话。支持两种方式：
+     * 1. 通过 dialog_id 直接发送到指定对话
+     * 2. 通过 task_id 发送到任务对话（自动创建对话如不存在）
+     * 两个参数至少提供一个，同时提供时优先使用 dialog_id
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__send_ai_assistant
+     *
+     * @apiParam {Number} [dialog_id]           对话ID（与task_id二选一）
+     * @apiParam {Number} [task_id]             任务ID（与dialog_id二选一，自动创建对话）
+     * @apiParam {String} text                 消息内容
+     * @apiParam {String} [text_type=md]       消息格式：md 或 html
+     * @apiParam {String} [silence=no]         是否静默发送：yes/no
+     * @apiParam {String} [nickname]           自定义发送者昵称（最多20字，留空则显示"AI 助手"）
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function msg__send_ai_assistant()
+    {
+        $user = User::auth();
+        //
+        $dialog_id = intval(Request::input('dialog_id'));
+        $task_id = intval(Request::input('task_id'));
+        $text = trim(Request::input('text'));
+        $text_type = strtolower(trim(Request::input('text_type'))) ?: 'md';
+        $silence = in_array(strtolower(trim(Request::input('silence'))), ['yes', 'true', '1']);
+        $nickname = trim(Request::input('nickname'));
+        $markdown = in_array($text_type, ['md', 'markdown']);
+        //
+        if (empty($dialog_id) && empty($task_id)) {
+            return Base::retError('dialog_id 或 task_id 至少提供一个');
+        }
+        if (empty($text)) {
+            return Base::retError('消息内容不能为空');
+        }
+        if (mb_strlen($text) > 200000) {
+            return Base::retError('消息内容最大不能超过200000字');
+        }
+        if (mb_strlen($nickname) > 20) {
+            return Base::retError('发送者昵称最多不能超过20字');
+        }
+        //
+        if ($dialog_id) {
+            // Direct dialog mode: verify user is a member
+            WebSocketDialog::checkDialog($dialog_id);
+        } else {
+            // Task mode: resolve task -> dialog_id (auto-create if needed)
+            $task = ProjectTask::find($task_id);
+            if (!$task) {
+                return Base::retError('任务不存在');
+            }
+            if (!ProjectUser::whereProjectId($task->project_id)->whereUserid($user->userid)->exists()) {
+                return Base::retError('没有权限操作此任务');
+            }
+            // 任务可见性校验（与 task__one 一致）
+            if ($task->visibility != 1) {
+                $projectOwnerids = ProjectUser::whereProjectId($task->project_id)
+                    ->whereIn('owner', [ProjectUser::OWNER_PRIMARY, ProjectUser::OWNER_DEPUTY])
+                    ->pluck('userid')->map(fn($v) => (int)$v)->toArray();
+                if (!in_array($user->userid, $projectOwnerids)) {
+                    $visibleUserids = array_merge(
+                        ProjectTaskUser::whereTaskId($task_id)->pluck('userid')->toArray(),
+                        ProjectTaskUser::whereTaskPid($task_id)->pluck('userid')->toArray(),
+                        ProjectTaskVisibilityUser::whereTaskId($task_id)->pluck('userid')->toArray()
+                    );
+                    if (!in_array($user->userid, $visibleUserids)) {
+                        return Base::retError('没有权限操作此任务');
+                    }
+                }
+            }
+            if (!$task->dialog_id) {
+                $dialog = WebSocketDialog::createGroup($task->name, $task->relationUserids(), 'task');
+                if ($dialog) {
+                    $task->dialog_id = $dialog->id;
+                    $task->save();
+                    $task->pushMsg('dialog');
+                } else {
+                    return Base::retError('无法创建任务对话');
+                }
+            }
+            $dialog_id = $task->dialog_id;
+        }
+        //
+        $msgData = ['text' => $text];
+        if ($markdown) {
+            $msgData['type'] = 'md';
+        }
+        if ($nickname !== '') {
+            $msgData['nickname'] = $nickname;
+        }
+        //
+        $result = WebSocketDialogMsg::sendMsg(
+            null,
+            $dialog_id,
+            'text',
+            $msgData,
+            \App\Module\AiTaskSuggestion::AI_ASSISTANT_USERID,
+            true,   // push_self
+            false,  // push_retry
+            $silence
+        );
+        //
+        return $result;
+    }
+
+    /**
+     * @api {post} api/dialog/msg/sendlocation 发送位置消息
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__sendlocation
+     *
+     * @apiParam {Number} dialog_id             对话ID
+     * @apiParam {String} type                  位置类型
+     * - baidu: 百度地图
+     * - amap: 高德地图
+     * - tencent: 腾讯地图
+     * @apiParam {Number} lng                   经度
+     * @apiParam {Number} lat                   纬度
+     * @apiParam {String} title                 位置名称
+     * @apiParam {Number} [distance]            距离（米）
+     * @apiParam {String} [address]             位置地址
+     * @apiParam {String} [thumb]               预览图片（url）
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function msg__sendlocation()
+    {
+        $user = User::auth();
+        //
+        $dialog_id = intval(Request::input('dialog_id'));
+        $type = strtolower(trim(Request::input('type')));
+        $lng = floatval(Request::input('lng'));
+        $lat = floatval(Request::input('lat'));
+        $title = trim(Request::input('title'));
+        $distance = intval(Request::input('distance'));
+        $address = trim(Request::input('address'));
+        $thumb = trim(Request::input('thumb'));
+        //
+        if (empty($lng) || $lng < -180 || $lng > 180
+            || empty($lat) || $lat < -90 || $lat > 90) {
+            return Base::retError('经纬度错误');
+        }
+        if (empty($title)) {
+            return Base::retError('位置名称不能为空');
+        }
+        //
+        WebSocketDialog::checkDialog($dialog_id);
+        //
+        if (in_array($type, ['baidu', 'amap', 'tencent'])) {
+            $msgData = [
+                'type' => $type,
+                'lng' => $lng,
+                'lat' => $lat,
+                'title' => $title,
+                'distance' => $distance,
+                'address' => $address,
+                'thumb' => $thumb,
+            ];
+            return WebSocketDialogMsg::sendMsg(null, $dialog_id, 'location', $msgData, $user->userid);
+        }
+        return Base::retError('位置类型错误');
+    }
+
+    /**
+     * @api {get} api/dialog/msg/readlist 获取消息阅读情况
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__readlist
+     *
+     * @apiParam {Number} msg_id            消息ID（需要是消息的发送人）
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function msg__readlist()
+    {
+        $user = User::auth();
+        //
+        $msg_id = intval(Request::input('msg_id'));
+        //
+        $msg = WebSocketDialogMsg::whereId($msg_id)->whereUserid($user->userid)->first();
+        if (empty($msg)) {
+            return Base::retError('不是发送人');
+        }
+        //
+        $read = WebSocketDialogMsgRead::whereMsgId($msg_id)->get();
+        return Base::retSuccess('success', $read ?: []);
+    }
+
+    /**
+     * @api {get} api/dialog/msg/detail 消息详情
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__detail
+     *
+     * @apiParam {Number} msg_id            消息ID
+     * @apiParam {String} only_update_at    仅获取update_at字段
+     * - no (默认)
+     * - yes
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function msg__detail()
+    {
+        $user =User::auth();
+        //
+        $msg_id = intval(Request::input('msg_id'));
+        $only_update_at = Request::input('only_update_at', 'no');
+        //
+        $dialogMsg = WebSocketDialogMsg::whereId($msg_id)->first();
+        if (empty($dialogMsg)) {
+            return Base::retError("文件不存在");
+        }
+        //
+        if ($only_update_at == 'yes') {
+            return Base::retSuccess('success', [
+                'id' => $dialogMsg->id,
+                'update_at' => Carbon::parse($dialogMsg->updated_at)->toDateTimeString()
+            ]);
+        }
+        //
+        $data = $dialogMsg->toArray();
+        //
+        if ($data['type'] == 'file') {
+            $msg = Base::json2array($dialogMsg->getRawOriginal('msg'));
+            $msg = File::formatFileData($msg);
+            $data['content'] = $msg['content'];
+            $data['file_mode'] = $msg['file_mode'];
+        } elseif ($data['type'] == 'longtext') {
+            $data['content'] = [
+                'type' => 'htm',
+                'content' => Doo::translate("内容不存在")
+            ];
+            if (isset($data['msg']['file']['path'])) {
+                $filePath = public_path($data['msg']['file']['path']);
+                if (file_exists($filePath)) {
+                    $data['content']['type'] = $data['msg']['type'];
+                    $data['content']['content'] = file_get_contents($filePath);
+                }
+            }
+        }
+        //
+        if ($dialogMsg->type === 'file') {
+            UserRecentItem::record(
+                $user->userid,
+                UserRecentItem::TYPE_MESSAGE_FILE,
+                $dialogMsg->id,
+                UserRecentItem::SOURCE_DIALOG,
+                $dialogMsg->dialog_id
+            );
+        }
+
+        return Base::retSuccess('success', $data);
+    }
+
+    /**
+     * @api {get} api/dialog/msg/download 文件下载
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__download
+     *
+     * @apiParam {Number} msg_id                消息ID
+     * @apiParam {String} down                  直接下载
+     * - yes: 下载（默认）
+     * - preview: 转预览地址
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function msg__download()
+    {
+        User::auth();
+        //
+        $msg_id = intval(Request::input('msg_id'));
+        $down = Request::input('down', 'yes');
+        //
+        $msg = WebSocketDialogMsg::whereId($msg_id)->first();
+        abort_if(empty($msg), 403, "This file not exist.");
+        abort_if($msg->type != 'file', 403, "This file not support download.");
+        $array = Base::json2array($msg->getRawOriginal('msg'));
+        //
+        if ($down === 'preview') {
+            return Redirect::to(FileContent::toPreviewUrl($array));
+        }
+        //
+        $filePath = public_path($array['path']);
+        return Base::DownloadFileResponse($filePath, $array['name']);
+    }
+
+    /**
+     * @api {get} api/dialog/msg/withdraw 聊天消息撤回
+     *
+     * @apiDescription 消息撤回限制24小时内，需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__withdraw
+     *
+     * @apiParam {Number} msg_id            消息ID
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function msg__withdraw()
+    {
+        $user = User::auth();
+        $msg_id = intval(Request::input("msg_id"));
+        $msg = WebSocketDialogMsg::whereId($msg_id)->whereUserid($user->userid)->first();
+        if (empty($msg)) {
+            return Base::retError("消息不存在或已被删除");
+        }
+        $dialog = WebSocketDialog::checkDialog($msg->dialog_id);
+        //
+        if (!$user->bot && !$dialog->isSelfDialog()) {
+            Setting::validateMsgLimit('rev', $msg);
+        }
+        $msg->withdrawMsg();
+        return Base::retSuccess("success");
+    }
+
+    /**
+     * @api {get} api/dialog/msg/voice2text 语音消息转文字
+     *
+     * @apiDescription 将语音消息转文字，需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__voice2text
+     *
+     * @apiParam {Number} msg_id            消息ID
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function msg__voice2text()
+    {
+        $user = User::auth();
+        //
+        $msg_id = intval(Request::input("msg_id"));
+        $msg = WebSocketDialogMsg::whereId($msg_id)->first();
+        if (empty($msg)) {
+            return Base::retError("消息不存在或已被删除");
+        }
+        if ($msg->type !== 'record') {
+            return Base::retError("仅支持语音消息");
+        }
+        $msgData = Base::json2array($msg->getRawOriginal('msg'));
+        if ($msgData['text']) {
+            $textUserid = is_array($msgData['text_userid']) ? $msgData['text_userid'] : [];
+            if (!in_array($user->userid, $textUserid)) {
+                $textUserid[] = $user->userid;
+                $msg->updateInstance([
+                    'msg' => array_merge($msgData, ['text_userid' => $textUserid]),
+                ]);
+                $msg->save();
+            }
+            return Base::retSuccess("success", $msg);
+        }
+        WebSocketDialog::checkDialog($msg->dialog_id);
+        // 根据用户语言构建提示词
+        $extParams = [];
+        if ($user->lang === 'zh') {
+            $extParams['prompt'] = "如果识别到中文，优先使用简体中文输出";
+        } elseif ($user->lang === 'zh-CHT') {
+            $extParams['prompt'] = "如果識別到中文，優先使用繁體中文輸出";
+        }
+        //
+        $result = AI::transcriptions(public_path($msgData['path']), $extParams);
+        if (Base::isError($result)) {
+            return $result;
+        }
+        //
+        $msg->updateInstance([
+            'msg' => array_merge($msgData, [
+                'text' => $result['data']['text'],
+                'text_userid' => [$user->userid]
+            ]),
+        ]);
+        $msg->save();
+        return Base::retSuccess("success", $msg);
+    }
+
+    /**
+     * @api {get} api/dialog/msg/translation 翻译消息
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__translation
+     *
+     * @apiParam {Number} msg_id            消息ID
+     * @apiParam {Number} [force]           强制翻译（1是、0否）
+     * - 默认不强制翻译，已翻译过的消息不再翻译
+     * @apiParam {String} [language]        目标语言，默认当前语言
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function msg__translation()
+    {
+        User::auth();
+        //
+        $msg_id = intval(Request::input("msg_id"));
+        $force = intval(Request::input("force"));
+        $language = Base::inputOrHeader('language');
+        if (empty($language)) {
+            return Base::retError("参数错误");
+        }
+        $targetLanguage = Doo::getLanguages($language);
+        //
+        if (empty($targetLanguage)) {
+            return Base::retError("参数错误");
+        }
+        $msg = WebSocketDialogMsg::whereId($msg_id)->first();
+        if (empty($msg)) {
+            return Base::retError("消息不存在或已被删除");
+        }
+        if (!in_array($msg->type, ['text', 'record'])) {
+            return Base::retError("此消息不支持翻译");
+        }
+        WebSocketDialog::checkDialog($msg->dialog_id);
+        //
+        $row = WebSocketDialogMsgTranslate::whereMsgId($msg_id)->whereLanguage($language)->first();
+        if ($row) {
+            if ($force) {
+                $row->delete();
+            } else {
+                return Base::retSuccess("success", $row->only(['msg_id', 'language', 'content']));
+            }
+        }
+        //
+        $msgData = Base::json2array($msg->getRawOriginal('msg'));
+        if (empty($msgData['text'])) {
+            return Base::retError("消息内容为空");
+        }
+        if ($msg->type === 'text' && $msgData['type'] === 'md') {
+            $msgData['text'] = preg_replace('/:::\s*reasoning.*?:::/s', '', $msgData['text']);
+        }
+        $result = AI::translations($msgData['text'], $targetLanguage, $force);
+        if (Base::isError($result)) {
+            return $result;
+        }
+        $row = WebSocketDialogMsgTranslate::createInstance([
+            'dialog_id' => $msg->dialog_id,
+            'msg_id' => $msg_id,
+            'language' => $language,
+            'content' => $result['data']['translated_text'],
+        ]);
+        $row->save();
+        //
+        return Base::retSuccess("success", $row->only(['msg_id', 'language', 'content']));
+    }
+
+    /**
+     * @api {get} api/dialog/msg/mark 消息标记操作
+     *
+     * @apiDescription  需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__mark
+     *
+     * @apiParam {Number} dialog_id             会话ID
+     * @apiParam {String} type                  类型
+     * - read: 已读
+     * - unread: 未读
+     * @apiParam {Number} [after_msg_id]        仅标记已读指定之后（含）的消息
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function msg__mark()
+    {
+        $user = User::auth();
+        //
+        $dialog_id = intval(Request::input('dialog_id'));
+        $type = Request::input('type');
+        $after_msg_id = intval(Request::input('after_msg_id'));
+        //
+        $dialogUser = WebSocketDialogUser::with(['webSocketDialog'])->whereDialogId($dialog_id)->whereUserid($user->userid)->first();
+        if (empty($dialogUser?->webSocketDialog)) {
+            return Base::retError('会话不存在');
+        }
+        switch ($type) {
+            case 'read':
+                // 标记已读
+                $builder = WebSocketDialogMsgRead::whereDialogId($dialog_id)
+                    ->whereUserid($user->userid)
+                    ->whereReadAt(null)
+                    ->select(['id', 'msg_id']);
+                if ($after_msg_id > 0) {
+                    $builder->where('msg_id', '>=', $after_msg_id);
+                }
+                $builder->chunkById(100, function ($list) {
+                    WebSocketDialogMsgRead::onlyMarkRead($list);
+                });
+                break;
+
+            case 'unread':
+                // 标记未读
+                break;
+
+            default:
+                return Base::retError("参数错误");
+        }
+        $dialogUser->mark_unread = $type == 'unread' ? 1 : 0;
+        $dialogUser->save();
+        $unreadData = WebSocketDialog::generateUnread($dialog_id, $user->userid);
+        return Base::retSuccess("success", [
+            'id' => $dialog_id,
+            'unread' => $unreadData['unread'],
+            'unread_one' => $unreadData['unread_one'],
+            'mention' => $unreadData['mention'],
+            'mention_ids' => $unreadData['mention_ids'],
+            'user_at' => Carbon::parse($dialogUser->updated_at)->toDateTimeString('millisecond'),
+            'user_ms' => Carbon::parse($dialogUser->updated_at)->valueOf(),
+            'mark_unread' => $dialogUser->mark_unread,
+        ]);
+    }
+
+    /**
+     * @api {get} api/dialog/msg/silence 消息免打扰
+     *
+     * @apiDescription  需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__silence
+     *
+     * @apiParam {Number} dialog_id             会话ID
+     * @apiParam {String} type                  类型
+     * - set
+     * - cancel
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function msg__silence()
+    {
+        $user = User::auth();
+        $dialogId = intval(Request::input('dialog_id'));
+        $type = Request::input('type');
+        $dialogUser = WebSocketDialogUser::whereUserid($user->userid)->whereDialogId($dialogId)->first();
+        if (!$dialogUser) {
+            return Base::retError("会话不存在");
+        }
+        //
+        $dialogData = WebSocketDialog::find($dialogId);
+        if (empty($dialogData)) {
+            return Base::retError("会话不存在");
+        }
+        if ($dialogData->type === 'group' && $dialogData->group_type !== 'user') {
+            return Base::retError("此会话不允许设置免打扰");
+        }
+        //
+        switch ($type) {
+            case 'set':
+                $data['silence'] = 0;
+                WebSocketDialogMsgRead::whereUserid($user->userid)
+                    ->whereReadAt(null)
+                    ->whereDialogId($dialogId)
+                    ->chunkById(100, function ($list) {
+                        WebSocketDialogMsgRead::onlyMarkRead($list);
+                    });
+                $dialogUser->silence = 1;
+                $dialogUser->save();
+                break;
+
+            case 'cancel':
+                $dialogUser->silence = 0;
+                $dialogUser->save();
+                break;
+
+            default:
+                return Base::retError("参数错误");
+        }
+        $data = [
+            'id' => $dialogId,
+            'silence' => $dialogUser->silence,
+        ];
+        return Base::retSuccess("success", $data);
+    }
+
+    /**
+     * @api {get} api/dialog/msg/forward 转发消息给
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__forward
+     *
+     * @apiParam {Number} msg_id                消息ID
+     * @apiParam {Array} dialogids              转发给的对话ID
+     * @apiParam {Array} userids                转发给的成员ID
+     * @apiParam {Number} show_source           是否显示原发送者信息
+     * @apiParam {String} leave_message         转发留言
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function msg__forward()
+    {
+        $user = User::auth();
+        //
+        $msg_ids = Request::input('msg_ids');
+        $msg_id = intval(Request::input("msg_id"));
+        $dialogids = Request::input('dialogids');
+        $userids = Request::input('userids');
+        $show_source = intval(Request::input("show_source"));
+        $leave_message = Request::input('leave_message');
+        //
+        if (empty($dialogids) && empty($userids)) {
+            return Base::retError("请选择对话或成员");
+        }
+        //
+        // 支持批量逐条转发
+        if (!empty($msg_ids) && is_array($msg_ids)) {
+            if (count($msg_ids) > 100) {
+                return Base::retError("最多转发100条消息");
+            }
+            $allMsgs = [];
+            $msgs = WebSocketDialogMsg::whereIn('id', $msg_ids)->orderBy('created_at')->get();
+            if ($msgs->isEmpty()) {
+                return Base::retError("消息不存在或已被删除");
+            }
+            WebSocketDialog::checkDialog($msgs->first()->dialog_id);
+            foreach ($msgs as $msg) {
+                if (in_array($msg->type, WebSocketDialogMsg::$unforwardableTypes)) {
+                    continue;
+                }
+                $res = $msg->forwardMsg($dialogids, $userids, $user, $show_source, $leave_message);
+                if (Base::isSuccess($res)) {
+                    $allMsgs = array_merge($allMsgs, $res['data']['msgs']);
+                }
+                // 留言只在第一条时发送，后续不再重复
+                $leave_message = '';
+            }
+            return Base::retSuccess('转发成功', [
+                'msgs' => $allMsgs
+            ]);
+        }
+        //
+        $msg = WebSocketDialogMsg::whereId($msg_id)->first();
+        if (empty($msg)) {
+            return Base::retError("消息不存在或已被删除");
+        }
+        WebSocketDialog::checkDialog($msg->dialog_id);
+        //
+        return $msg->forwardMsg($dialogids, $userids, $user, $show_source, $leave_message);
+    }
+
+    /**
+     * @api {get} api/dialog/msg/mergeforward 合并转发消息
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__mergeforward
+     *
+     * @apiParam {Array} msg_ids                消息ID数组（最多100条）
+     * @apiParam {Array} dialogids              转发给的对话ID
+     * @apiParam {Array} userids                转发给的成员ID
+     * @apiParam {Number} show_source           是否显示原发送者信息
+     * @apiParam {String} leave_message         转发留言
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function msg__mergeforward()
+    {
+        $user = User::auth();
+        //
+        $msg_ids = Request::input('msg_ids');
+        $dialogids = Request::input('dialogids');
+        $userids = Request::input('userids');
+        $show_source = intval(Request::input("show_source"));
+        $leave_message = Request::input('leave_message');
+        //
+        if (empty($dialogids) && empty($userids)) {
+            return Base::retError("请选择对话或成员");
+        }
+        if (empty($msg_ids) || !is_array($msg_ids)) {
+            return Base::retError("请选择要转发的消息");
+        }
+        if (count($msg_ids) > 100) {
+            return Base::retError("最多转发100条消息");
+        }
+        //
+        return WebSocketDialogMsg::mergeForwardMsg($msg_ids, $dialogids, $userids, $user, $show_source, $leave_message);
+    }
+
+    /**
+     * @api {get} api/dialog/msg/mergedetail 合并转发消息详情
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__mergedetail
+     *
+     * @apiParam {Number} msg_id                合并转发消息ID
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function msg__mergedetail()
+    {
+        User::auth();
+        //
+        $msg_id = intval(Request::input('msg_id'));
+        if ($msg_id <= 0) {
+            return Base::retError('参数错误');
+        }
+        $dialogMsg = WebSocketDialogMsg::find($msg_id);
+        if (!$dialogMsg || $dialogMsg->type !== 'merge-forward') {
+            return Base::retError('消息不存在或已被删除');
+        }
+        WebSocketDialog::checkDialog($dialogMsg->dialog_id);
+        //
+        $msgData = Base::json2array($dialogMsg->getRawOriginal('msg'));
+        $msgIds = $msgData['msg_ids'] ?? [];
+        if (empty($msgIds)) {
+            return Base::retError('消息不存在或已被删除');
+        }
+        $msgs = WebSocketDialogMsg::withTrashed()
+            ->whereIn('id', $msgIds)
+            ->orderBy('created_at')
+            ->get()
+            ->map(function ($msg) {
+                return [
+                    'id' => $msg->id,
+                    'userid' => $msg->userid,
+                    'type' => $msg->type,
+                    'msg' => $msg->msg,
+                    'created_at' => $msg->created_at->toDateTimeString(),
+                ];
+            });
+        return Base::retSuccess('success', [
+            'msgs' => $msgs,
+        ]);
+    }
+
+    /**
+     * @api {get} api/dialog/msg/emoji emoji回复
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__emoji
+     *
+     * @apiParam {Number} msg_id            消息ID
+     * @apiParam {String} symbol            回复或取消的emoji表情
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function msg__emoji()
+    {
+        $user = User::auth();
+        //
+        $msg_id = intval(Request::input("msg_id"));
+        $symbol = Request::input("symbol");
+        //
+        $emojiPattern = '/(?:' .
+            '[\x{1F600}-\x{1F64F}]|' .          // 表情符号
+            '[\x{1F300}-\x{1F5FF}]|' .          // 符号和象形文字
+            '[\x{1F680}-\x{1F6FF}]|' .          // 交通和地图符号
+            '[\x{1F1E0}-\x{1F1FF}]|' .          // 区域指示符号（国旗）
+            '[\x{2600}-\x{26FF}]|' .            // 杂项符号
+            '[\x{2700}-\x{27BF}]|' .            // 装饰符号
+            '[\x{1F900}-\x{1F9FF}]|' .          // 补充符号和象形文字
+            '[\x{1F000}-\x{1F02F}]|' .          // 麻将牌
+            '[\x{1F0A0}-\x{1F0FF}]|' .          // 扑克牌
+            '[\x{1F100}-\x{1F64F}]|' .          // 封闭字母数字补充
+            '[\x{FE0F}]|' .                     // 变体选择器-16
+            '[\x{20E3}]|' .                     // 组合封闭键帽
+            '[\x{30}-\x{39}\x{23}\x{2A}][\x{FE0F}]?[\x{20E3}]' . // 键帽序列 (0-9, #, *)
+        ')/u';
+        if (!preg_match($emojiPattern, $symbol)) {
+            return Base::retError("参数错误");
+        }
+        //
+        $msg = WebSocketDialogMsg::whereId($msg_id)->first();
+        if (empty($msg)) {
+            return Base::retError("消息不存在或已被删除");
+        }
+        WebSocketDialog::checkDialog($msg->dialog_id);
+        //
+        return $msg->emojiMsg($symbol, $user->userid);
+    }
+
+    /**
+     * @api {get} api/dialog/msg/tag 标注/取消标注
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__tag
+     *
+     * @apiParam {Number} msg_id            消息ID
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function msg__tag()
+    {
+        $user = User::auth();
+        //
+        $msg_id = intval(Request::input("msg_id"));
+        //
+        $msg = WebSocketDialogMsg::whereId($msg_id)->first();
+        if (empty($msg)) {
+            return Base::retError("消息不存在或已被删除");
+        }
+        WebSocketDialog::checkDialog($msg->dialog_id);
+        //
+        return $msg->toggleTagMsg($user->userid);
+    }
+
+    /**
+     * @api {get} api/dialog/msg/todo 设待办/取消待办
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__todo
+     *
+     * @apiParam {Number} msg_id            消息ID
+     * @apiParam {String} type              设待办对象
+     * - all: 会话全部成员（默认）
+     * - user: 会话指定成员
+     * @apiParam {Array} userids            会员ID组
+     * - type=user 有效，格式: [userid1, userid2, userid3]
+     * - 可通过 type=user 及 userids:[] 一起使用来清除所有人的待办
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function msg__todo()
+    {
+        Base::checkClientVersion('0.37.18');
+        $user = User::auth();
+        //
+        $msg_id = intval(Request::input("msg_id"));
+        $type = trim(Request::input("type", "all"));
+        $userids = Request::input('userids');
+        //
+        $msg = WebSocketDialogMsg::whereId($msg_id)->first();
+        if (empty($msg)) {
+            return Base::retError("消息不存在或已被删除");
+        }
+        $dialog = WebSocketDialog::checkDialog($msg->dialog_id);
+        //
+        if ($type === 'all') {
+            $userids = $dialog->dialogUser->pluck('userid')->toArray();
+        } else {
+            $userids = is_array($userids) ? $userids : [];
+        }
+        $remindAt = Request::exists('remind_at') ? (trim(Request::input('remind_at', '')) ?: null) : false;
+        return $msg->toggleTodoMsg($user->userid, $userids, $remindAt);
+    }
+
+    /**
+     * @api {get} api/dialog/msg/todolist 获取消息待办情况
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__todolist
+     *
+     * @apiParam {Number} msg_id            消息ID
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function msg__todolist()
+    {
+        User::auth();
+        //
+        $msg_id = intval(Request::input('msg_id'));
+        //
+        $msg = WebSocketDialogMsg::whereId($msg_id)->first();
+        if (empty($msg)) {
+            return Base::retError("消息不存在或已被删除");
+        }
+        WebSocketDialog::checkDialog($msg->dialog_id);
+        //
+        $todo = WebSocketDialogMsgTodo::whereMsgId($msg_id)->get();
+        return Base::retSuccess('success', $todo ?: []);
+    }
+
+    /**
+     * @api {post} api/dialog/msg/todoremind 设置/修改/取消待办提醒时间
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__todoremind
+     *
+     * @apiParam {Number} msg_id        消息ID
+     * @apiParam {Array}  userids       目标成员ID组
+     * @apiParam {String} remind_at     提醒时间（空表示取消提醒）
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function msg__todoremind()
+    {
+        $user = User::auth();
+        //
+        $msg_id = intval(Request::input("msg_id"));
+        $userids = Request::input('userids');
+        $userids = is_array($userids) ? array_values(array_filter(array_map('intval', $userids))) : [];
+        $remindAt = trim(Request::input('remind_at', '')) ?: null;
+        //
+        $msg = WebSocketDialogMsg::whereId($msg_id)->first();
+        if (empty($msg)) {
+            return Base::retError("消息不存在或已被删除");
+        }
+        if (in_array($msg->type, ['tag', 'todo', 'notice'])) {
+            return Base::retError('此消息不支持设待办');
+        }
+        $dialog = WebSocketDialog::checkDialog($msg->dialog_id);
+        //
+        if (empty($userids)) {
+            return Base::retError("请选择成员");
+        }
+        // 权限管控（与设/取消待办同一开关与放行规则）
+        if (Base::settingFind('system', 'todo_set_permission') === 'close') {
+            $others = array_diff($userids, [$user->userid]);
+            if ($others && !$dialog->checkTodoOwnerPermission($user->userid)) {
+                return Base::retError('仅群主、项目/任务负责人或系统管理员可设置或取消他人待办');
+            }
+        }
+        //
+        $msg->setTodoRemind($userids, $remindAt);
+        //
+        $upData = [
+            'id' => $msg->id,
+            'todo' => $msg->todo,
+            'todo_done' => $msg->isTodoDone(true),
+            'dialog_id' => $msg->dialog_id,
+        ];
+        $dialog->pushMsg('update', $upData);
+        //
+        return Base::retSuccess($remindAt ? '设置成功' : '取消成功', $upData);
+    }
+
+    /**
+     * @api {get} api/dialog/msg/done 完成待办
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__done
+     *
+     * @apiParam {Number} id            待办数据ID
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function msg__done()
+    {
+        $user = User::auth();
+        //
+        $id = intval(Request::input("id"));
+        //
+        $add = [];
+        $update = [];
+        $todo = WebSocketDialogMsgTodo::whereId($id)->whereUserid($user->userid)->first();
+        if ($todo && empty($todo->done_at)) {
+            $todo->done_at = Carbon::now();
+            $todo->save();
+            //
+            $msg = WebSocketDialogMsg::find($todo->msg_id);
+            if ($msg) {
+                $doneUserIds = WebSocketDialogMsgTodo::whereMsgId($msg->id)
+                    ->whereNotNull('done_at')
+                    ->orderByDesc('done_at')
+                    ->orderByDesc('id')
+                    ->pluck('userid')
+                    ->toArray();
+                //
+                $lastMsg = WebSocketDialogMsg::whereDialogId($todo->dialog_id)->orderByDesc('id')->first();
+                if ($lastMsg && $lastMsg->type === 'todo') {
+                    $lastMsgData = $lastMsg->msg;
+                    $lastData = $lastMsgData['data'] ?? [];
+                    if (($lastMsgData['action'] ?? '') === 'done' && intval($lastData['id'] ?? 0) === $msg->id) {
+                        $lastData['done_userids'] = $doneUserIds;
+                        $lastMsgData['data'] = $lastData;
+                        $lastMsg->updateInstance(['msg' => $lastMsgData]);
+                        $lastMsg->save();
+                        $update = [
+                            'id' => $lastMsg->id,
+                            'dialog_id' => $lastMsg->dialog_id,
+                            'type' => $lastMsg->type,
+                            'msg' => $lastMsgData,
+                        ];
+                        $lastMsg->webSocketDialog?->pushMsg('update', $update);
+                    }
+                }
+                //
+                if (empty($update)) {
+                    $res = WebSocketDialogMsg::sendMsg(null, $todo->dialog_id, 'todo', [
+                        'action' => 'done',
+                        'data' => [
+                            'id' => $msg->id,
+                            'type' => $msg->type,
+                            'msg' => $msg->quoteTextMsg(),
+                            'done_userids' => $doneUserIds,
+                        ]
+                    ]);
+                    if (Base::isSuccess($res)) {
+                        $add = $res['data'];
+                    }
+                }
+                //
+                $msg->webSocketDialog?->pushMsg('update', [
+                    'id' => $msg->id,
+                    'todo' => $msg->todo,
+                    'todo_done' => $msg->isTodoDone(true),
+                    'dialog_id' => $msg->dialog_id,
+                ]);
+            }
+        }
+        //
+        return Base::retSuccess("待办已完成", [
+            'add' => $add ?: null,
+            'update' => $update ?: null,
+        ]);
+    }
+
+    /**
+     * @api {get} api/dialog/msg/color 设置颜色
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__color
+     *
+     * @apiParam {Number} dialog_id          会话ID
+     * @apiParam {String} color              颜色
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function msg__color()
+    {
+        $user = User::auth();
+
+        $dialogId = intval(Request::input('dialog_id'));
+        $color = Request::input('color','');
+        $dialogUser = WebSocketDialogUser::whereUserid($user->userid)->whereDialogId($dialogId)->first();
+        if (!$dialogUser) {
+            return Base::retError("会话不存在");
+        }
+        //
+        $dialogData = WebSocketDialog::find($dialogId);
+        if (empty($dialogData)) {
+            return Base::retError("会话不存在");
+        }
+        //
+        $dialogUser->color = $color;
+        $dialogUser->save();
+        //
+        $data = [
+            'id' => $dialogId,
+            'color' => $color
+        ];
+        return Base::retSuccess("success", $data);
+    }
+
+    /**
+     * 转换为AI对话
+     *
+     * @deprecated 已废弃方法，仅保留路由占位，后续版本中移除
+     */
+    public function msg__webhookmsg2ai()
+    {
+        Base::checkClientVersion('1.4.35');
+    }
+
+    /**
+     * @api {get} api/dialog/group/add 新增群组
+     *
+     * @apiDescription  需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName group__add
+     *
+     * @apiParam {String} [avatar]              群头像
+     * @apiParam {String} [chat_name]           群名称
+     * @apiParam {Array} userids                群成员，格式: [userid1, userid2, userid3]
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function group__add()
+    {
+        $user = User::auth();
+        //
+        $avatar = Request::input('avatar');
+        $avatar = $avatar ? Base::unFillUrl(is_array($avatar) ? $avatar[0]['path'] : $avatar) : '';
+        $chatName = trim(Request::input('chat_name'));
+        $userids = Request::input('userids');
+        //
+        if (!is_array($userids)) {
+            return Base::retError('请选择群成员');
+        }
+        $userids = array_merge([$user->userid], $userids);
+        $userids = array_values(array_filter(array_unique($userids)));
+        if (count($userids) < 2) {
+            return Base::retError('群成员至少2人');
+        }
+        //
+        if (empty($chatName)) {
+            $array = [];
+            foreach ($userids as $userid) {
+                $array[] = User::userid2nickname($userid);
+                if (count($array) >= 8 || strlen(implode(", ", $array)) > 100) {
+                    $array[] = "...";
+                    break;
+                }
+            }
+            $chatName = implode(", ", $array);
+        }
+        if ($user->isTemp()) {
+            return Base::retError('无法创建群组');
+        }
+        $dialog = WebSocketDialog::createGroup($chatName, $userids, 'user', $user->userid);
+        if (empty($dialog)) {
+            return Base::retError('创建群组失败');
+        }
+        if ($avatar) {
+            $dialog->avatar = $avatar;
+            $dialog->save();
+        }
+        $data = WebSocketDialog::synthesizeData($dialog, $user->userid);
+        $userids = array_values(array_diff($userids, [$user->userid]));
+        $dialog->pushMsg("groupAdd", null, $userids);
+        return Base::retSuccess('创建成功', $data);
+    }
+
+    /**
+     * @api {get} api/dialog/group/edit 修改群组
+     *
+     * @apiDescription  需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName group__edit
+     *
+     * @apiParam {Number} dialog_id             会话ID
+     * @apiParam {String} [avatar]              群头像
+     * @apiParam {String} [chat_name]           群名称
+     * @apiParam {Number} [admin]               系统管理员操作（1：只判断是不是系统管理员，否则判断是否群管理员）
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function group__edit()
+    {
+        $user = User::auth();
+        //
+        $dialog_id = intval(Request::input('dialog_id'));
+        $admin = intval(Request::input('admin'));
+        //
+        if ($admin === 1) {
+            $user->checkAdmin();
+            $dialog = WebSocketDialog::find($dialog_id);
+            if (empty($dialog)) {
+                WebSocketDialogMsgRead::forceRead($dialog_id, $user->userid);
+                return Base::retError('对话不存在或已被删除', ['dialog_id' => $dialog_id], -4003);
+            }
+        } else {
+            $dialog = WebSocketDialog::checkDialog($dialog_id);
+            if (!$dialog->isOwner(User::userid())) {
+                throw new \App\Exceptions\ApiException('仅群主或群管理员可操作');
+            }
+        }
+        //
+        $data = ['id' => $dialog->id];
+        $array = [];
+        if (Request::exists('avatar')) {
+            $avatar = Request::input('avatar');
+            $avatar = $avatar ? Base::unFillUrl(is_array($avatar) ? $avatar[0]['path'] : $avatar) : '';
+            $data['avatar'] = Base::fillUrl($array['avatar'] = $avatar);
+        }
+        $existName = Request::exists('chat_name') || Request::exists('name');
+        // 个人群组群主可改名；全员群仅系统管理员可改名
+        $canEditName = $dialog->group_type === 'user' || ($dialog->group_type === 'all' && $admin === 1);
+        if ($existName && $canEditName) {
+            $chatName = trim(Request::input('chat_name') ?: Request::input('name'));
+            if (mb_strlen($chatName) < 2) {
+                return Base::retError('群名称至少2个字');
+            }
+            if (mb_strlen($chatName) > 100) {
+                return Base::retError('群名称最长限制100个字');
+            }
+            $data['name'] = $array['name'] = $chatName;
+        }
+        //
+        if ($array) {
+            $dialog->updateInstance($array);
+            $dialog->save();
+            WebSocketDialogUser::whereDialogId($dialog->id)->change(['updated_at' => Carbon::now()->toDateTimeString('millisecond')]);
+        }
+        //
+        return Base::retSuccess('修改成功', $data);
+    }
+
+    /**
+     * @api {get} api/dialog/group/adduser 添加群成员
+     *
+     * @apiDescription  需要token身份
+     * - 有群主时：只有群主可以邀请
+     * - 没有群主时：群内成员都可以邀请
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName group__adduser
+     *
+     * @apiParam {Number} dialog_id             会话ID
+     * @apiParam {Array} userids                新增的群成员，格式: [userid1, userid2, userid3]
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function group__adduser()
+    {
+        $user = User::auth();
+        //
+        $dialog_id = intval(Request::input('dialog_id'));
+        $userids = Base::json2array(Request::input('userids'));
+        //
+        if (!is_array($userids)) {
+            return Base::retError('请选择群成员');
+        }
+        //
+        $dialog = WebSocketDialog::checkDialog($dialog_id);
+        // 有群主时，仅群主/群管理员可邀请；无群主时，任意成员可邀请
+        if ($dialog->owner_id > 0 && !$dialog->isOwner($user->userid)) {
+            throw new \App\Exceptions\ApiException('仅限群主或群管理员操作');
+        }
+        //
+        $dialog->checkGroup();
+        $dialog->joinGroup($userids, $user->userid);
+        $dialog->pushMsg("groupJoin", null, $userids);
+        return Base::retSuccess('添加成功');
+    }
+
+    /**
+     * @api {get} api/dialog/group/deluser 移出（退出）群成员
+     *
+     * @apiDescription  需要token身份
+     * - 只有群主、邀请人可以踢人
+     * - 群主、任务人员、项目人员不可被踢或退出
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName group__adduser
+     *
+     * @apiParam {Number} dialog_id             会话ID
+     * @apiParam {Array} [userids]              移出的群成员，格式: [userid1, userid2, userid3]
+     * - 留空表示自己退出
+     * - 有值表示移出，仅限群主操作
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function group__deluser()
+    {
+        $user = User::auth();
+        //
+        $dialog_id = intval(Request::input('dialog_id'));
+        $userids = Base::json2array(Request::input('userids'));
+        //
+        $type = 'remove';
+        if (empty($userids)) {
+            $type = 'exit';
+            $userids = [$user->userid];
+        }
+        //
+        if (!is_array($userids)) {
+            return Base::retError('请选择群成员');
+        }
+        //
+        $dialog = WebSocketDialog::checkDialog($dialog_id);
+        //
+        $dialog->checkGroup();
+        $dialog->exitGroup($userids, $type);
+        $dialog->pushMsg("groupExit", null, $userids);
+        return Base::retSuccess($type === 'remove' ? '移出成功' : '退出成功');
+    }
+
+    /**
+     * @api {get} api/dialog/group/transfer 转让群组
+     *
+     * @apiDescription  需要token身份
+     * - 只有群主且是个人类型群可以解散
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName group__transfer
+     *
+     * @apiParam {Number} dialog_id             会话ID
+     * @apiParam {Number} userid                新的群主
+     * @apiParam {String} check_owner           转让验证  yes-需要验证  no-不需要验证
+     * @apiParam {String} key                   密钥（APP_KEY）
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function group__transfer()
+    {
+        if (!Base::is_internal_ip(Base::getIp()) || Request::input("key") !== config('app.key')) {
+            $user = User::auth();
+        }
+        //
+        $dialog_id = intval(Request::input('dialog_id'));
+        $userid = intval(Request::input('userid'));
+        $check_owner = trim(Request::input('check_owner', 'yes')) === 'yes';
+        //
+        if ($check_owner && $userid === $user?->userid) {
+            return Base::retError('你已经是群主');
+        }
+        if (!User::whereUserid($userid)->exists()) {
+            return Base::retError('请选择有效的新群主');
+        }
+        //
+        $dialog = WebSocketDialog::checkDialog($dialog_id, $check_owner);
+        //
+        $dialog->checkGroup($check_owner ? 'user' : null);
+        $oldOwnerId = (int)$dialog->owner_id;
+        $dialog->owner_id = $userid;
+        if ($dialog->save()) {
+            $dialog->joinGroup($userid, 0);
+            // 同步 role：原主 role=0、新主 role=1（覆盖即可）
+            if ($oldOwnerId > 0 && $oldOwnerId !== (int)$userid) {
+                WebSocketDialogUser::where('dialog_id', $dialog->id)
+                    ->where('userid', $oldOwnerId)
+                    ->update(['role' => 0]);
+            }
+            WebSocketDialogUser::where('dialog_id', $dialog->id)
+                ->where('userid', $userid)
+                ->update(['role' => 1]);
+            $dialog->pushMsg("groupUpdate", [
+                'id' => $dialog->id,
+                'owner_id' => $dialog->owner_id,
+                'deputy_ids' => $dialog->deputy_ids,
+            ]);
+        }
+        return Base::retSuccess('转让成功');
+    }
+
+    /**
+     * 任命群管理员（仅群主可操作）
+     *
+     * @apiParam {Number} dialog_id 群对话ID
+     * @apiParam {Number} userid 要任命的群成员 userid
+     */
+    public function group__adddeputy()
+    {
+        $user = User::auth();
+        $dialog_id = intval(Request::input('dialog_id'));
+        $userid = intval(Request::input('userid'));
+
+        if ($userid <= 0) {
+            return Base::retError('请选择有效的成员');
+        }
+
+        $dialog = WebSocketDialog::checkDialog($dialog_id, true); // checkOwner=true：仅群主
+        $dialog->checkGroup('user'); // 仅普通群
+
+        $member = WebSocketDialogUser::where('dialog_id', $dialog->id)
+            ->where('userid', $userid)
+            ->first();
+        if (empty($member)) {
+            return Base::retError('该用户不是群成员');
+        }
+
+        if ((int)$member->role === 1) {
+            return Base::retError('不能将群主任命为群管理员');
+        }
+        if ((int)$member->role !== 2) {
+            $member->role = 2;
+            $member->save();
+            $dialog->pushMsg('groupUpdate', [
+                'id' => $dialog->id,
+                'deputy_ids' => $dialog->fresh()->deputy_ids,
+            ]);
+        }
+
+        return Base::retSuccess('任命成功');
+    }
+
+    /**
+     * 罢免群管理员（仅群主可操作）
+     *
+     * @apiParam {Number} dialog_id 群对话ID
+     * @apiParam {Number} userid 要罢免的群管理员 userid
+     */
+    public function group__deldeputy()
+    {
+        $user = User::auth();
+        $dialog_id = intval(Request::input('dialog_id'));
+        $userid = intval(Request::input('userid'));
+
+        if ($userid <= 0) {
+            return Base::retError('请选择有效的成员');
+        }
+
+        $dialog = WebSocketDialog::checkDialog($dialog_id, true);
+        $dialog->checkGroup('user');
+
+        $member = WebSocketDialogUser::where('dialog_id', $dialog->id)
+            ->where('userid', $userid)
+            ->first();
+        if (empty($member)) {
+            return Base::retSuccess('罢免成功'); // 幂等：本来就不是成员
+        }
+
+        if ((int)$member->role === 2) {
+            $member->role = 0;
+            $member->save();
+            $dialog->pushMsg('groupUpdate', [
+                'id' => $dialog->id,
+                'deputy_ids' => $dialog->fresh()->deputy_ids,
+            ]);
+        }
+
+        return Base::retSuccess('罢免成功');
+    }
+
+    /**
+     * @api {get} api/dialog/group/disband 解散群组
+     *
+     * @apiDescription  需要token身份
+     * - 只有群主且是个人类型群可以解散
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName group__disband
+     *
+     * @apiParam {Number} dialog_id             会话ID
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function group__disband()
+    {
+        User::auth();
+        //
+        $dialog_id = intval(Request::input('dialog_id'));
+        //
+        $dialog = WebSocketDialog::checkDialog($dialog_id, true);
+        //
+        $dialog->checkGroup('user');
+        $dialog->deleteDialog();
+        return Base::retSuccess('解散成功');
+    }
+
+    /**
+     * @api {get} api/dialog/group/searchuser 搜索个人群（仅限管理员）
+     *
+     * @apiDescription  需要token身份，用于创建部门搜索个人群组
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName group__searchuser
+     *
+     * @apiParam {String} key             关键词
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function group__searchuser()
+    {
+        User::auth('admin');
+        //
+        $key = trim(Request::input('key'));
+        //
+        $builder = WebSocketDialog::whereType('group')->whereGroupType('user');
+        if ($key) {
+            $builder->where('name', 'like', "%{$key}%");
+        }
+        return Base::retSuccess('success', [
+            'list' => $builder->take(20)->get()
+        ]);
+    }
+
+    /**
+     * @api {get} api/dialog/common/list 共同群组群聊
+     *
+     * @apiDescription  需要token身份，按置顶时间、用户在群组中的最后活跃时间倒序排列
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName common__list
+     *
+     * @apiParam {Number} [target_userid]         目标用户ID（和谁的共同群组，不传则获取自己所有群组）
+     * @apiParam {Number} [page]                  当前页数，默认为1
+     * @apiParam {Number} [pagesize]              每页显示条数，默认为20，最大100
+     * @apiParam {String} [only_count]            是否只返回数量，传入 'yes' 则只返回数量不返回列表
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     *
+     * - 当 only_count=yes 时：
+     * @apiSuccess {Number} data.total 群组数量
+     *
+     * - 当获取列表时，返回 Laravel 标准分页格式：
+     * @apiSuccess {Array} data.data 群组列表数据
+     * @apiSuccess {Number} data.current_page 当前页数
+     * @apiSuccess {Number} data.per_page 每页显示条数
+     * @apiSuccess {Number} data.total 总数量
+     * @apiSuccess {String} data.first_page_url 第一页链接
+     * @apiSuccess {String} data.last_page_url 最后页链接
+     * @apiSuccess {String} data.next_page_url 下一页链接
+     * @apiSuccess {String} data.prev_page_url 上一页链接
+     */
+    public function common__list()
+    {
+        $user = User::auth();
+        //
+        $target_userid = intval(Request::input('target_userid'));
+        $only_count = trim(Request::input('only_count')) === 'yes';
+
+        // 参考getDialogList的查询模式
+        $builder = DB::table('web_socket_dialog_users as u')
+            ->select(['d.*', 'u.top_at', 'u.last_at', 'u.mark_unread', 'u.silence', 'u.hide', 'u.color', 'u.updated_at as user_at'])
+            ->join('web_socket_dialogs as d', 'u.dialog_id', '=', 'd.id')
+            ->where('u.userid', $user->userid)
+            ->where('d.type', 'group')
+            ->where('d.group_type', 'user')
+            ->whereNull('d.deleted_at');
+
+        if ($target_userid) {
+            // 获取与目标用户的共同群组
+            $builder->whereExists(function($query) use ($target_userid) {
+                $query->select(DB::raw(1))
+                      ->from('web_socket_dialog_users as du2')
+                      ->whereColumn('du2.dialog_id', 'd.id')
+                      ->where('du2.userid', $target_userid);
+            });
+        }
+
+        if ($only_count) {
+            // 只返回数量
+            return Base::retSuccess('success', [
+                'total' => $builder->count()
+            ]);
+        }
+
+        // 返回分页列表，参考getDialogList的排序逻辑
+        $list = $builder
+            ->orderByDesc('u.top_at')
+            ->orderByDesc('u.last_at')
+            ->paginate(Base::getPaginate(100, 20));
+
+        // 处理分页数据，与getDialogList保持一致的处理方式
+        $list->transform(function ($item) use ($user) {
+            return WebSocketDialog::synthesizeData($item, $user->userid);
+        });
+
+        return Base::retSuccess('success', $list);
+    }
+
+    /**
+     * @api {post} api/dialog/okr/add 创建OKR评论会话
+     *
+     * @apiDescription  需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName okr__add
+     *
+     * @apiParam {String} name                   标题
+     * @apiParam {Number} link_id                关联id
+     * @apiParam {Array}  userids                群成员，格式: [userid1, userid2, userid3]
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function okr__add()
+    {
+        $user = User::auth();
+        //
+        $name = trim(Request::input('name'));
+        $link_id = intval(Request::input('link_id'));
+        $userids = Request::input('userids');
+        //
+        if (empty($name)) {
+            return Base::retError('群名称至少2个字');
+        }
+        //
+        $dialog = WebSocketDialog::createGroup($name, $userids, 'okr', $user->userid);
+        if (empty($dialog)) {
+            return Base::retError('创建群组失败');
+        }
+        if ($link_id) {
+            $dialog->link_id = $link_id;
+            $dialog->save();
+        }
+        return Base::retSuccess('创建成功', $dialog);
+    }
+
+    /**
+     * @api {post} api/dialog/okr/push 推送OKR相关信息
+     *
+     * @apiDescription  需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName okr__push
+     *
+     * @apiParam {String}  text                  发送内容
+     * @apiParam {Number}  userid                成员ID
+     * @apiParam {String}  key                   密钥（APP_KEY）
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function okr__push()
+    {
+        if (!Base::is_internal_ip(Base::getIp()) || Request::input("key") !== config('app.key')) {
+            User::auth();
+        }
+        $text = trim(Request::input('text'));
+        $userid = intval(Request::input('userid'));
+        //
+        $botUser = User::botGetOrCreate('okr-alert');
+        if (empty($botUser)) {
+            return Base::retError('机器人不存在');
+        }
+        //
+        $dialog = WebSocketDialog::checkUserDialog($botUser, $userid);
+        if ($dialog) {
+            WebSocketDialogMsg::sendMsg(null, $dialog->id, 'text', ['text' => $text], $botUser->userid);
+        }
+        return Base::retSuccess('success', $dialog);
+    }
+
+    /**
+     * @api {post} api/dialog/msg/wordchain 发送接龙消息
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__wordchain
+     *
+     * @apiParam {Number} dialog_id         对话ID
+     * @apiParam {String} uuid              接龙ID
+     * @apiParam {String} text              接龙内容
+     * @apiParam {Array}  list              接龙列表
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function msg__wordchain()
+    {
+        $user = User::auth();
+        //
+        $dialog_id = intval(Request::input('dialog_id'));
+        $uuid = trim(Request::input('uuid'));
+        $text = trim(Request::input('text'));
+        $list = Request::input('list') ?? [];
+        //
+        WebSocketDialog::checkDialog($dialog_id);
+        $strlen = mb_strlen($text);
+        $reallen = mb_strlen(preg_replace("/<img[^>]*?>/i", "", $text));
+        if ($strlen < 1 || empty($list)) {
+            return Base::retError('内容不能为空');
+        }
+        if ($reallen > 200000) {
+            return Base::retError('内容最大不能超过200000字');
+        }
+        //
+        return AbstractModel::transaction(function () use ($user, $uuid, $dialog_id, $list, $text) {
+            if ($uuid) {
+                $dialogMsg = WebSocketDialogMsg::whereDialogId($dialog_id)
+                    ->lockForUpdate()
+                    ->whereType('word-chain')
+                    ->orderByDesc('created_at')
+                    ->where('msg', 'like', "%$uuid%")
+                    ->value('msg');
+                //
+                $createId = $dialogMsg['createid'] ?? $user->userid;
+                // 新增
+                $msgList = $dialogMsg['list'] ?? [];
+                $addList = array_udiff($list, $msgList, function($a, $b) {
+                    return ($a['id'] ?? 0) - $b['id'];
+                });
+                foreach ($addList as $key => $item) {
+                    $item['id'] = intval(round(microtime(true) * 1000)) + $key;
+                    $msgList[] = $item;
+                }
+                // 编辑更新
+                $lists = array_column($list,null,'id');
+                foreach ($msgList as $key => $item) {
+                    if (isset($lists[$item['id']]) && $item['userid'] == $user->userid) {
+                        $msgList[$key] = $lists[$item['id']];
+                    }
+                }
+                $list = $msgList;
+            } else {
+                $createId = $user->userid;
+                $uuid = Base::generatePassword(36);
+                foreach ($list as $key => $item) {
+                    $list[$key]['id'] = intval(round(microtime(true) * 1000)) + $key;
+                }
+            }
+            //
+            usort($list, function ($a, $b) {
+                return $a['id'] - $b['id'];
+            });
+            //
+            $msgData = [
+                'text' => $text,
+                'list' => $list,
+                'userid' => $user->userid,
+                'createid' => $createId,
+                'uuid' => $uuid,
+            ];
+            return WebSocketDialogMsg::sendMsg(null, $dialog_id, 'word-chain', $msgData, $user->userid);
+        });
+    }
+
+    /**
+     * @api {post} api/dialog/msg/vote 发起投票
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__vote
+     *
+     * @apiParam {Number} dialog_id             对话ID
+     * @apiParam {String} text                  投票内容
+     * @apiParam {Array}  type                  投票类型
+     * @apiParam {String} [uuid]                投票ID
+     * @apiParam {Array}  [list]                投票列表
+     * @apiParam {Number} [multiple]            多选
+     * @apiParam {Number} [anonymous]           匿名
+     * @apiParam {Array}  [vote]                投票
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function msg__vote()
+    {
+        $user = User::auth();
+        //
+        $dialog_id = intval(Request::input('dialog_id'));
+        $uuid = trim(Request::input('uuid'));
+        $text = trim(Request::input('text'));
+        $type = trim(Request::input('type', 'create'));
+        $multiple = intval(Request::input('multiple')) ?: 0;
+        $anonymous = intval(Request::input('anonymous')) ?: 0;
+        $list = Request::input('list');
+        $vote = Request::input('vote') ?: [];
+        $votes = is_array($vote) ? $vote : [$vote];
+        //
+        WebSocketDialog::checkDialog($dialog_id);
+        //
+        $action = null;
+        if ($type != 'create') {
+            if ($type == 'vote' && empty($votes)) {
+                return Base::retError('参数错误');
+            }
+            if (empty($uuid)) {
+                return Base::retError('参数错误');
+            }
+            return AbstractModel::transaction(function () use ($user, $uuid, $dialog_id, $type, $votes) {
+                //
+                $dialogMsgs = WebSocketDialogMsg::whereDialogId($dialog_id)
+                    ->lockForUpdate()
+                    ->whereType('vote')
+                    ->orderByDesc('created_at')
+                    ->where('msg', 'like', "%$uuid%")
+                    ->get();
+                //
+                $result = [];
+                if ($type == 'again') {
+                    $res = WebSocketDialogMsg::sendMsg(null, $dialog_id, 'vote', $dialogMsgs[0]->msg, $user->userid);
+                    if (Base::isError($res)) {
+                        return $res;
+                    }
+                    $result[] = $res['data'];
+                } else {
+                    foreach ($dialogMsgs as $dialogMsg) {
+                        $action = "change-{$dialogMsg->id}";
+                        $msgData = $dialogMsg->msg;
+                        if ($type == 'finish') {
+                            $msgData['state'] = 0;
+                        } else {
+                            $msgDataVotes = $msgData['votes'] ?? [];
+                            if (in_array($user->userid, array_column($msgDataVotes, 'userid'))) {
+                                return Base::retError('不能重复投票');
+                            }
+                            $msgDataVotes[] = [
+                                'userid' => $user->userid,
+                                'votes' => $votes,
+                            ];
+                            $msgData['votes'] = $msgDataVotes;
+                        }
+                        //
+                        $res = WebSocketDialogMsg::sendMsg($action, $dialog_id, 'vote', $msgData, $user->userid);
+                        if (Base::isError($res)) {
+                            return $res;
+                        }
+                        $result[] = $res['data'];
+                    }
+                }
+                //
+                return Base::retSuccess('发送成功', $result);
+            });
+        } else {
+            $strlen = mb_strlen($text);
+            $reallen = mb_strlen(preg_replace("/<img[^>]*?>/i", "", $text));
+            if ($strlen < 1) {
+                return Base::retError('内容不能为空');
+            }
+            if ($reallen > 200000) {
+                return Base::retError('内容最大不能超过200000字');
+            }
+            $msgData = [
+                'text' => $text,
+                'list' => $list,
+                'userid' => $user->userid,
+                'uuid' => $uuid ?: Base::generatePassword(36),
+                'multiple' => $multiple,
+                'anonymous' => $anonymous,
+                'votes' => [],
+                'state' => 1
+            ];
+            $res = WebSocketDialogMsg::sendMsg($action, $dialog_id, 'vote', $msgData, $user->userid);
+            if (Base::isError($res)) {
+                return $res;
+            }
+            return Base::retSuccess('发送成功', [$res['data']]);
+        }
+    }
+
+    /**
+     * @api {get} api/dialog/msg/top 置顶/取消置顶
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__top
+     *
+     * @apiParam {Number} msg_id            消息ID
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function msg__top()
+    {
+        $user = User::auth();
+        //
+        $msg_id = intval(Request::input("msg_id"));
+        //
+        $msg = WebSocketDialogMsg::whereId($msg_id)->first();
+        if (empty($msg)) {
+            return Base::retError("消息不存在或已被删除");
+        }
+        $dialog = WebSocketDialog::checkDialog($msg->dialog_id);
+        //
+        $before = $dialog->top_msg_id;
+        $beforeTopUserid = $dialog->top_userid;
+        $dialog->top_msg_id = $msg->id == $before ? 0 : $msg->id;
+        $dialog->top_userid = $dialog->top_msg_id ? $user->userid : 0;
+        $dialog->save();
+        //
+        $data = [
+            'add' => null,
+            'update' => [
+                'dialog_id' => $dialog->id,
+                'top_msg_id' => $dialog->top_msg_id,
+                'top_userid' => $dialog->top_userid,
+            ]
+        ];
+        $res = WebSocketDialogMsg::sendMsg(null, $dialog->id, 'top', [
+            'action' => $dialog->top_msg_id ? 'add' : 'remove',
+            'data' => [
+                'id' => $msg->id,
+                'type' => $msg->type,
+                'msg' => $msg->quoteTextMsg()
+            ]
+        ], $user->userid);
+        if (Base::isSuccess($res)) {
+            $data['add'] = $res['data'];
+            $dialog->pushMsg('updateTopMsg', $data['update']);
+        } else {
+            $dialog->top_msg_id = $before;
+            $dialog->top_userid = $beforeTopUserid;
+            $dialog->save();
+        }
+        //
+        return Base::retSuccess($dialog->top_msg_id ? '置顶成功' : '取消成功', $data);
+    }
+
+    /**
+     * @api {get} api/dialog/msg/topinfo 获取置顶消息
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName msg__topinfo
+     *
+     * @apiParam {Number} dialog_id            会话ID
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function msg__topinfo()
+    {
+        User::auth();
+        //
+        $dialog_id = intval(Request::input('dialog_id'));
+        //
+        $dialog = WebSocketDialog::checkDialog($dialog_id);
+        //
+        $topMsg = WebSocketDialogMsg::whereId($dialog->top_msg_id)->first();
+        //
+        return Base::retSuccess('success', $topMsg);
+    }
+
+    /**
+     * 标记消息已应用
+     *
+     * @deprecated 已废弃方法，仅保留路由占位，后续版本中移除
+     */
+    public function msg__applied()
+    {
+        Base::checkClientVersion('1.4.35');
+    }
+
+    /**
+     * @api {get} api/dialog/sticker/search 搜索在线表情
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName sticker__search
+     *
+     * @apiParam {String} key            关键词
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function sticker__search()
+    {
+        User::auth();
+        //
+        $key = trim(Request::input('key'));
+        return Base::retSuccess('success', [
+            'list' => Extranet::sticker($key)
+        ]);
+    }
+
+    /**
+     * @api {get} api/dialog/config 获取会话配置
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName config
+     *
+     * @apiParam {Number} dialog_id         对话ID
+     * @apiParam {String} type              配置类型
+     *
+     * @apiSuccess {String} value           配置值
+     */
+    public function config()
+    {
+        $user = User::auth();
+
+        $dialog_id = intval(Request::input('dialog_id'));
+        $type = Request::input('type');
+
+        if (!$dialog_id || !$type) {
+            return Base::retError('参数错误');
+        }
+
+        WebSocketDialog::checkDialog($dialog_id);
+
+        $config = WebSocketDialogConfig::where('dialog_id', $dialog_id)
+            ->where('userid', $user->userid)
+            ->where('type', $type)
+            ->first();
+
+        return Base::retSuccess('success', [
+            'value' => $config?->value
+        ]);
+    }
+
+    /**
+     * @api {post} api/dialog/config/save 保存会话配置
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName config__save
+     *
+     * @apiParam {Number} dialog_id         对话ID
+     * @apiParam {String} type              配置类型
+     * @apiParam {String} value             配置值
+     *
+     * @apiSuccess {String} msg             成功提示
+     */
+    public function config__save()
+    {
+        $user = User::auth();
+
+        $dialog_id = intval(Request::input('dialog_id'));
+        $type = Request::input('type');
+        $value = Request::input('value');
+
+        if (!$dialog_id || !$type) {
+            return Base::retError('参数错误');
+        }
+
+        WebSocketDialog::checkDialog($dialog_id);
+
+        if (WebSocketDialogConfig::updateOrCreate(
+            [
+                'dialog_id' => $dialog_id,
+                'userid' => $user->userid,
+                'type' => $type,
+            ],
+            [
+                'value' => $value,
+            ]
+        )) {
+            WebSocketDialogMsg::sendMsg(null, $dialog_id, 'notice', [
+                'notice' => $value ? ("修改提示词：" . Base::cutStr($value, 100)) : "取消提示词",
+            ], User::userid(), true, true);
+        }
+
+        return Base::retSuccess('保存成功');
+    }
+
+    /**
+     * @api {get} api/dialog/session/create AI-开启新会话
+     *
+     * @apiDescription 需要token身份，仅限与AI用户会话
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName session_create
+     *
+     * @apiParam {Number} dialog_id         对话ID
+     * @apiParam {Number} [userid]          用户ID（与 dialog_id 二选一，userid 优先）
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function session__create()
+    {
+        $user = User::auth();
+        //
+        $dialog_id = intval(Request::input('dialog_id'));
+        $userid = intval(Request::input('userid'));
+        //
+        if ($userid) {
+            $dialog = WebSocketDialog::checkUserDialog($user, $userid);
+        } else {
+            $dialog = WebSocketDialog::checkDialog($dialog_id);
+        }
+        //
+        if (!$dialog->isSessionDialog()) {
+            return Base::retError('当前对话不支持');
+        }
+        //
+        $previousSessionId = intval($dialog->session_id);
+        //
+        $session = WebSocketDialogSession::whereDialogId($dialog->id)->whereTitle('')->first();
+        if ($session) {
+            $dialog->session_id = $session->id;
+            $dialog->save();
+            return Base::retSuccess('success', $session);
+        }
+        //
+        $session = WebSocketDialogSession::create([
+            'dialog_id' => $dialog->id,
+        ]);
+        $session->save();
+        $dialog->session_id = $session->id;
+        $dialog->save();
+        //
+        WebSocketDialogMsgRead::markSessionMessagesAsRead($dialog->id, $previousSessionId);
+        //
+        return Base::retSuccess('success', $session);
+    }
+
+    /**
+     * @api {get} api/dialog/session/list AI-获取会话列表
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName session_list
+     *
+     * @apiParam {Number} dialog_id         对话ID
+     *
+     * @apiParam {Number} [page]                当前页，默认:1
+     * @apiParam {Number} [pagesize]            每页显示数量，默认:20，最大:50
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function session__list()
+    {
+        User::auth();
+        //
+        $dialog_id = intval(Request::input('dialog_id'));
+        //
+        $dialog = WebSocketDialog::checkDialog($dialog_id);
+        //
+        $sessions = WebSocketDialogSession::whereDialogId($dialog->id)
+            ->orderByDesc('id')
+            ->paginate(Base::getPaginate(100, 10));
+        $sessions->transform(function ($item) use ($dialog) {
+            if ($item->id === $dialog->session_id) {
+                $item->is_open = 1;
+            } else {
+                $item->is_open = 0;
+            }
+            return $item;
+        });
+        //
+        return Base::retSuccess('success', $sessions);
+    }
+
+    /**
+     * @api {get} api/dialog/session/open AI-打开会话
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName session_open
+     *
+     * @apiParam {Number} session_id         会话ID
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function session__open()
+    {
+        User::auth();
+        //
+        $session_id = intval(Request::input('session_id'));
+        //
+        $session = WebSocketDialogSession::whereId($session_id)->first();
+        if (empty($session)) {
+            return Base::retError('会话不存在或已被删除');
+        }
+        //
+        $dialog = WebSocketDialog::checkDialog($session->dialog_id);
+        //
+        $dialog->session_id = $session->id;
+        $dialog->save();
+        //
+        return Base::retSuccess('success', $session);
+    }
+
+    /**
+     * @api {post} api/dialog/session/rename AI-重命名会话
+     *
+     * @apiDescription 需要token身份
+     * @apiVersion 1.0.0
+     * @apiGroup dialog
+     * @apiName session_rename
+     *
+     * @apiParam {Number} session_id         会话ID
+     * @apiParam {String} title              会话名称
+     *
+     * @apiSuccess {Number} ret     返回状态码（1正确、0错误）
+     * @apiSuccess {String} msg     返回信息（错误描述）
+     * @apiSuccess {Object} data    返回数据
+     */
+    public function session__rename()
+    {
+        User::auth();
+        //
+        $session_id = intval(Request::input('session_id'));
+        $title = trim((string)Request::input('title'));
+        //
+        if ($session_id <= 0) {
+            return Base::retError('参数错误');
+        }
+        if ($title === '') {
+            return Base::retError('请输入会话名称');
+        }
+        //
+        $session = WebSocketDialogSession::whereId($session_id)->first();
+        if (empty($session)) {
+            return Base::retError('会话不存在或已被删除');
+        }
+        //
+        $dialog = WebSocketDialog::checkDialog($session->dialog_id);
+        if (!$dialog->isSessionDialog()) {
+            return Base::retError('当前对话不支持');
+        }
+        //
+        $session->title = Base::cutStr($title, 100);
+        $session->save();
+        $session->refresh();
+        Cache::forever('dialog_session_title_' . $session->id, true);
+        //
+        return Base::retSuccess('重命名成功', $session);
+    }
+}

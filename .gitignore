@@ -1,0 +1,68 @@
+# Dependencies
+/node_modules
+/vendor
+
+# Build and temporary files
+/build
+/public/hot
+/public/tmp
+/tmp
+/backup
+
+# Uploads and user-generated content
+/public/summary
+/public/uploads/*
+/public/.well-known
+/public/.user.ini
+
+# Storage and configuration
+/config/LICENSE
+/storage/*.key
+
+# Environment and configuration
+.env
+vars.yaml
+
+# IDE and editor files
+.cursor/*
+!.cursor/rules/
+!.cursor/rules/**
+.idea
+.vscode
+.windsurfrules
+
+# Development tools
+.vagrant
+Homestead.json
+Homestead.yaml
+
+# Development file
+/index.html
+
+# Testing
+.phpunit.result.cache
+test.*
+
+# Logs and debug files
+npm-debug.log
+yarn-error.log
+
+# Lock files
+dootask.lock
+package-lock.json
+
+# Laravel/Swoole specific
+laravels-timer-process.pid
+laravels.conf
+laravels.pid
+
+# System files
+._*
+.DS_Store
+
+# Documentation
+README_LOCAL.md
+
+# playwright
+.playwright-mcp/
+/.phpunit.cache

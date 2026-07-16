@@ -281,6 +281,8 @@ class IndexController extends InvokeController
         Task::deliver(new ManticoreSyncTask());
         // AI 任务建议
         Task::deliver(new AiTaskLoopTask());
+        // SCIM 用户同步
+        Task::deliver(new \App\Tasks\ScimSyncTask());
 
         return "success";
     }

@@ -77,6 +77,9 @@ Route::prefix('api')->middleware(['webapi'])->group(function () {
     Route::any('test/{method}/{action}',                TestController::class);
 });
 
+// SCIM SET webhook（无需 webapi 认证，自验签）
+Route::post('api/scim/webhook', [\App\Http\Controllers\Api\ScimWebhookController::class, '__invoke']);
+
 /**
  * 页面
  */

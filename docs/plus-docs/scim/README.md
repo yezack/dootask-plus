@@ -21,15 +21,29 @@ SCIM User:
 
 ## 字段映射
 
-| SCIM | Dootask | 说明 |
+### SCIM 核心字段
+| SCIM | Dootask | 示例 |
 |------|---------|------|
-| `externalId` (=`id`) | `users` 扩展 `scim_external_id` | 主匹配键 |
-| `userName` | — | 警号，存扩展 |
-| `emails[0].value` | `users.email` | `警号@sjq.sh` 作为登录邮箱 |
-| `displayName` | `users.nickname` | 中文姓名 |
-| `name.familyName` | 扩展 `scim_family_name` | |
-| `active` | `users.disable_at` | true=null, false=now() |
-| `groups[].value` | 部门归属 | 按 group 名匹配/创建部门 |
+| `externalId` (=`id`) | `users` 扩展 `scim_external_id` | `abb1bb05...` |
+| `emails[0].value` | `users.email` | `066182@sjq.sh` |
+| `displayName` | `users.nickname` | 唐佳辉 |
+| `active` | `users.disable_at` | true→null, false→now() |
+
+### Admin API 扩展字段（/api/v1/users/{id}）
+| UniAuthSync | Dootask | 示例 |
+|-------------|---------|------|
+| `identity_id` → 查 `/api/v1/identities` | `users.profession` | 警察 |
+| `position_id` → 查 `/api/v1/positions` | 扩展 `scim_position` | 中队长 |
+| `org_id` → 查 `/api/v1/orgs` | 部门结构（第一层） | 松江分局 |
+| `phone` | `users` 扩展 | |
+| `role` | 扩展 `scim_role` | user |
+
+### 字典数据（一次性缓存）
+| 接口 | 内容 |
+|------|------|
+| `/api/v1/identities` | 警察、辅警、协勤 |
+| `/api/v1/positions` | 大队长、中队长、探长、民警、其他 |
+| `/api/v1/orgs` | 上海市公安局 → 松江分局 |
 
 ### 密码策略
 ```php

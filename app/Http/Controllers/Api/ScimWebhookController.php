@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Http\Controllers\Controller;
 use App\Scim\ScimClient;
 use App\Scim\ScimSet;
 use App\Scim\ScimUserMapper;
@@ -9,7 +10,7 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
 
-class ScimWebhookController extends AbstractController
+class ScimWebhookController extends Controller
 {
     private const USER_EVENTS = [
         'urn:ietf:params:scim:event:prov:create:notice',

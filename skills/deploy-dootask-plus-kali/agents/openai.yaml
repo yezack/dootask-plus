@@ -1,0 +1,4 @@
+interface:
+  display_name: "部署 DooTask Plus（Kali）"
+  short_description: "安全部署和排查 Kali 上的 DooTask Plus"
+  default_prompt: "使用 $deploy-dootask-plus-kali 检查并安全部署当前 DooTask Plus 到 Kali 主机。"

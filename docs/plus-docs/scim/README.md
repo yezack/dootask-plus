@@ -1,105 +1,81 @@
-# SCIM 集成设计（对接 UniAuthSync）
+# SCIM 集成（对接 UniAuthSync）
 
-Dootask Plus ← SCIM ← UniAuthSync（OAuth 服务器 `https://oauth.xz.sjq.sh`）
+DooTask Plus 从 [UniAuthSync](https://github.com/yezack/UniAuthSync) 同步用户，不新增 SCIM 专用表或字段，尽量复用 DooTask 原有用户、部门和离职机制。
 
----
-
-## 实际数据样例
-
-```
-SCIM User:
-  id:          "abb1bb05c7194003b7c16a44683cf9df"
-  userName:    "066182"              ← 警号
-  name.familyName: "唐佳辉"          ← 中文姓名
-  displayName: "唐佳辉"
-  emails[0].value: "066182@sjq.sh"   ← 警号@sjq.sh
-  active:      true
-  groups:      []                    ← 暂无分组
-```
-
----
+> SCIM 负责账号预配与资料同步，不等同于 OIDC 单点登录。当前登录仍使用 DooTask 原有登录流程。
 
 ## 字段映射
 
-### SCIM 核心字段
-| SCIM | Dootask | 示例 |
-|------|---------|------|
-| `externalId` (=`id`) | `users` 扩展 `scim_external_id` | `abb1bb05...` |
-| `emails[0].value` | `users.email` | `066182@sjq.sh` |
-| `displayName` | `users.nickname` | 唐佳辉 |
-| `active` | `users.disable_at` | true→null, false→now() |
+| UniAuthSync SCIM | DooTask 现有字段 | 规则 |
+|---|---|---|
+| `emails[0].value` | `users.email` | 唯一匹配键 |
+| `displayName` | `users.nickname` | 同步姓名并刷新拼音字段 |
+| enterprise `division` + `title` | `users.profession` | 例如 `警察 - 民警` |
+| custom `phone` | `users.tel` | 电话未被占用时同步 |
+| enterprise `department` | `users.department` | 只匹配唯一同名的现有部门，不创建部门 |
+| `active=false` | `disable_at` + `identity=disable` | 按原有离职机制禁用 |
 
-### Admin API 扩展字段（/api/v1/users/{id}）
-| UniAuthSync | Dootask | 示例 |
-|-------------|---------|------|
-| `identity_id` → 查 `/api/v1/identities` | `users.profession` | 警察 |
-| `position_id` → 查 `/api/v1/positions` | 扩展 `scim_position` | 中队长 |
-| `org_id` → 查 `/api/v1/orgs` | 部门结构（第一层） | 松江分局 |
-| `phone` | `users` 扩展 | |
-| `role` | 扩展 `scim_role` | user |
+SCIM `id`、`org_id`、身份证等字段不落库。用户邮箱变更会失去关联，因此 UniAuthSync 中已同步用户的邮箱应保持稳定。
 
-### 字典数据（一次性缓存）
-| 接口 | 内容 |
-|------|------|
-| `/api/v1/identities` | 警察、辅警、协勤 |
-| `/api/v1/positions` | 大队长、中队长、探长、民警、其他 |
-| `/api/v1/orgs` | 上海市公安局 → 松江分局 |
+部门采用保守默认策略：只给尚无部门的用户绑定唯一同名部门，不覆盖人工维护的部门。设置 `SCIM_REPLACE_DEPARTMENTS=true` 后，UniAuthSync 组织会替换用户现有部门并同步部门群成员。
 
-### 密码策略
-```php
-// 新建用户默认密码
-'password' => Hash::make('sjq@' . $userName)   // sjq@066182
-```
-
----
+`active=true` 默认不恢复 DooTask 中人工离职的用户；设置 `SCIM_REACTIVATE_USERS=true` 后才由 UniAuthSync 状态自动恢复。
 
 ## 同步方式
 
-### 1. 定时轮询（LoopTask）
+### 定时全量同步
 
-```
-每 60 分钟:
-  GET /oauth/token (client_credentials)
-  GET /scim/v2/Users?startIndex=1&count=100
-  → 遍历 → 匹配 email → createOrUpdate
-  → 记录 last_sync_at
-```
+每分钟检查一次同步间隔，达到 `SCIM_POLL_INTERVAL` 后：
 
-### 2. RFC 9967 SET Webhook（推送）
+1. `POST /oauth/token` 获取 client_credentials token；
+2. 分页调用 `GET /scim/v2/Users`；
+3. 按邮箱创建或更新用户；
+4. 记录本次尝试时间；全部成功后另行记录最后成功时间。
 
-在 UniAuthSync 客户端配置中填写：
+UniAuthSync 的用户列表只返回启用用户，因此离职/删除通知依赖下面的 SET Webhook，不能用“列表中不存在”判断离职。
+
+### RFC 9967 SET Webhook
+
+在 UniAuthSync OAuth 客户端中配置：
 
 | 字段 | 值 |
-|------|-----|
-| `scim_event_uri` | `https://dootask.xz.sjq.sh/api/scim/webhook` |
-| `scim_event_secret` | 16 位随机字符串 |
+|---|---|
+| `scim_event_uri` | `https://dootask.example.com/api/scim/webhook` |
+| `scim_event_secret` | 随机共享密钥 |
 
-dootask 接收 HMAC-SHA256 签名验证后处理三类事件：
-- `prov:create:notice` → 创建用户
-- `prov:patch:notice` → 更新用户
-- `prov:delete` → 禁用用户
+UniAuthSync 使用以下格式推送：
 
----
+- Content-Type：`application/secevent+jwt`
+- 请求体：RS256 compact JWT SET
+- 签名头：`X-SCIM-Event-Signature: <HMAC-SHA256 hex>`
 
-## Auth 配置
+DooTask 对完整原始请求体验证 HMAC，并校验 `iss`、`aud`、`iat`、`exp`、`jti` 和 `sub_id`，再用 `jti` 防重放。收到用户通知后根据 `sub_id.uri` 回调 UniAuthSync SCIM 用户详情，再复用同一字段映射同步。
+
+## 配置
 
 ```env
-# dootask .env
-SCIM_SERVER_URL=https://oauth.xz.sjq.sh
-SCIM_CLIENT_ID=710f75a2dc9c465fbaaf9cb9f31cb145
-SCIM_CLIENT_SECRET=189a7ebc77ea8a7be3ff8267f2c4c8f791aeabf536a8762961ad255bad7ee6e2
+SCIM_SERVER_URL=https://oauth.example.com
+# 可选；仅当 SET 的 iss 与 SCIM_SERVER_URL 不同时填写
+SCIM_ISSUER=
+SCIM_CLIENT_ID=<UniAuthSync client id>
+SCIM_CLIENT_SECRET=<UniAuthSync client secret>
 SCIM_POLL_INTERVAL=60
+SCIM_LOCK_SECONDS=3600
 SCIM_WEBHOOK_SECRET=<同 scim_event_secret>
-SCIM_DEFAULT_PASSWORD_PREFIX=sjq@
+
+# 留空时为新用户生成随机初始密码；仅兼容旧策略时才配置前缀
+SCIM_DEFAULT_PASSWORD_PREFIX=
+
+# 默认不创建部门、不覆盖人工部门、不自动恢复人工离职
+SCIM_SYNC_DEPARTMENT=true
+SCIM_REPLACE_DEPARTMENTS=false
+SCIM_REACTIVATE_USERS=false
 ```
 
----
+手动同步：
 
-## 实现清单
+```bash
+./cmd artisan scim:sync
+```
 
-- [ ] `app/Scim/ScimClient.php` — HTTP 客户端，含 token 获取
-- [ ] `app/Scim/ScimUserMapper.php` — 字段映射 + createOrUpdate
-- [ ] `app/Console/Commands/ScimSync.php` — `artisan scim:sync`
-- [ ] `app/Http/Controllers/Api/ScimWebhookController.php` — SET 推送接收
-- [ ] `app/Tasks/LoopTask.php` — 注册定时任务
-- [ ] `routes/api.php` — 注册 webhook 路由
+配置或路由变更后需按项目约定重启 LaravelS/Swoole。

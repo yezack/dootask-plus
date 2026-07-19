@@ -2246,7 +2246,7 @@ class UsersController extends AbstractController
             if (empty($parentDepartment)) {
                 return Base::retError('上级部门不存在或已被删除');
             }
-            if (count($parentDepartment->parents()) > 2) {
+            if (count($parentDepartment->parents()) > 8) {
                 return Base::retError('部门层级最多只能创建9级');
             }
             if ($id > 0 && UserDepartment::whereParentId($id)->whereId($parent_id)->exists()) {

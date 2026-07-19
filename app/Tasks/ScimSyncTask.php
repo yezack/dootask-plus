@@ -3,8 +3,7 @@
 namespace App\Tasks;
 
 use App\Module\Base;
-use App\Scim\ScimClient;
-use App\Scim\ScimUserMapper;
+use App\Services\ScimSyncService;
 
 /**
  * SCIM 定时同步任务
@@ -16,31 +15,20 @@ class ScimSyncTask extends AbstractTask
 {
     public function start(): void
     {
-        $serverUrl = env('SCIM_SERVER_URL', '');
+        $serverUrl = (string)config('dootask.scim.server_url', '');
         if (empty($serverUrl)) {
             return;
         }
 
-        $interval    = (int)env('SCIM_POLL_INTERVAL', 60);  // 分钟
+        $interval    = max(1, (int)config('dootask.scim.poll_interval', 60));  // 分钟
         $system      = Base::setting('system');
-        $lastSync    = $system['scim_last_sync'] ?? '';
+        $lastAttempt = $system['scim_last_attempt'] ?? $system['scim_last_sync'] ?? '';
 
-        if ($lastSync && now()->diffInMinutes($lastSync) < $interval) {
+        if ($lastAttempt && now()->diffInMinutes($lastAttempt, true) < $interval) {
             return; // 还没到时间
         }
 
-        $client = new ScimClient();
-        $stats  = ['created' => 0, 'updated' => 0, 'skipped' => 0, 'total' => 0];
-
-        foreach ($client->listUsers() as $scimUser) {
-            $result = ScimUserMapper::sync($scimUser);
-            $stats[$result]++;
-            $stats['total']++;
-        }
-
-        // 更新最后同步时间
-        $system['scim_last_sync'] = now()->toDateTimeString();
-        Base::setting('system', $system);
+        app(ScimSyncService::class)->run();
     }
 
     public function end(): void {}

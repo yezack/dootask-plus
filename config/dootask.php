@@ -45,4 +45,19 @@ return [
     // 在线授权：冻结（租约过期）后到吊销的宽限天数（OnlineLicense）
     'online_license_grace_days' => env('ONLINE_LICENSE_GRACE_DAYS', 14),
 
+    // SCIM / UniAuthSync 用户同步
+    'scim' => [
+        'server_url' => env('SCIM_SERVER_URL', ''),
+        'issuer' => env('SCIM_ISSUER', ''),
+        'client_id' => env('SCIM_CLIENT_ID', ''),
+        'client_secret' => env('SCIM_CLIENT_SECRET', ''),
+        'poll_interval' => env('SCIM_POLL_INTERVAL', 60),
+        'lock_seconds' => env('SCIM_LOCK_SECONDS', 3600),
+        'webhook_secret' => env('SCIM_WEBHOOK_SECRET', ''),
+        'default_password_prefix' => env('SCIM_DEFAULT_PASSWORD_PREFIX', ''),
+        'sync_department' => env('SCIM_SYNC_DEPARTMENT', true),
+        'replace_departments' => env('SCIM_REPLACE_DEPARTMENTS', false),
+        'reactivate_users' => env('SCIM_REACTIVATE_USERS', false),
+    ],
+
 ];

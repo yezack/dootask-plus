@@ -101,13 +101,28 @@
                         font-weight: 500;
                     }
                     &.level-2 {
-                        margin-left: 18px;
+                        margin-left: 9px;
                     }
                     &.level-3 {
-                        margin-left: 36px;
+                        margin-left: 18px;
                     }
                     &.level-4 {
+                        margin-left: 27px;
+                    }
+                    &.level-5 {
+                        margin-left: 36px;
+                    }
+                    &.level-6 {
+                        margin-left: 45px;
+                    }
+                    &.level-7 {
                         margin-left: 54px;
+                    }
+                    &.level-8 {
+                        margin-left: 63px;
+                    }
+                    &.level-9 {
+                        margin-left: 72px;
                     }
                     .department-owner-wrap {
                         display: flex;

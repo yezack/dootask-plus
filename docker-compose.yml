@@ -26,24 +26,25 @@ services:
       MYSQL_DB_NAME: "${DB_DATABASE}"
       MYSQL_USERNAME: "${DB_USERNAME}"
       MYSQL_PASSWORD: "${DB_PASSWORD}"
+      DB_PREFIX: "${DB_PREFIX:-}"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:${LARAVELS_LISTEN_PORT}/health"]
       interval: 5s
       timeout: 5s
-      retries: 5
-    networks:
-      - extnetwork
+      retries: 12
     depends_on:
       redis:
         condition: service_healthy
+    networks:
+      extnetwork:
+        aliases:
+          - php
+      Database-network:
     restart: unless-stopped
 
   nginx:
     container_name: "dootask-nginx-${APP_ID}"
     image: "nginx:alpine"
-    ports:
-      - "${APP_PORT}:80"
-      - "${APP_SSL_PORT:-0}:443"
     environment:
       APP_SCHEME: "${APP_SCHEME:-auto}"
     volumes:
@@ -53,12 +54,15 @@ services:
       test: ["CMD", "curl", "-f", "http://localhost/health"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 12
     depends_on:
       php:
         condition: service_healthy
     networks:
-      - extnetwork
+      extnetwork:
+      Gateway-network:
+        aliases:
+          - "dootask-${APP_ID}"
     restart: unless-stopped
 
   redis:
@@ -70,9 +74,11 @@ services:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 12
     networks:
-      - extnetwork
+      extnetwork:
+        aliases:
+          - redis
     restart: unless-stopped
 
   appstore:
@@ -81,7 +87,7 @@ services:
     image: "dootask/appstore:0.5.4"
     volumes:
       - shared_data:/usr/share/dootask
-      - ${HOST_DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock
+      - "${HOST_DOCKER_SOCK:-/var/run/docker.sock}:/var/run/docker.sock"
       - ./:/var/www
     environment:
       HOST_PWD: "${PWD}"
@@ -89,7 +95,7 @@ services:
       test: ["CMD", "curl", "-f", "http://localhost/health"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 12
     networks:
       - extnetwork
     restart: unless-stopped
@@ -97,6 +103,12 @@ services:
 networks:
   extnetwork:
     name: "dootask-networks-${APP_ID}"
+  Database-network:
+    external: true
+    name: "Database-network"
+  Gateway-network:
+    external: true
+    name: "Gateway-network"
 
 volumes:
   shared_data:

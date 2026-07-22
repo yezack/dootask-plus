@@ -75,7 +75,8 @@ export default {
 
     // 加载状态
     loads: [],
-    loadDashboardTasks: false,
+    // null: 尚未初始化，true: 加载中，false: 已完成首次加载
+    loadDashboardTasks: null,
     loadUserBasic: false,
     loadProjects: 0,
     loadDialogs: 0,
@@ -104,6 +105,7 @@ export default {
     cacheTasks: [],
     cacheProjectParameter: [],
     cacheDepartmentOwnerIds: [],
+    departmentOwnerProjectViewEnabled: false,
     departmentOwnerViewRestored: false,
     departmentOwnerProjectsRefreshing: false,
     departmentOwnerReadonlyUrls: [
@@ -162,6 +164,7 @@ export default {
     dialogHistory: [],
     dialogDrafts: [],
     dialogQuotes: [],
+    dialogWithdraws: [],
     dialogMsgTransfer: {time: 0},
     dialogSseList: [],
     dialogDroupWordChain: {},

@@ -220,7 +220,8 @@
                 @on-other="onOther"
                 @on-show-emoji-user="onShowEmojiUser"
                 @on-merge-forward-detail="onMergeForwardDetail"
-                @on-multi-select-toggle="onMultiSelectToggle">
+                @on-multi-select-toggle="onMultiSelectToggle"
+                @on-withdraw-re-edit="onWithdrawReEdit">
                 <template #header v-if="!isChildComponent">
                     <div class="dialog-item head-box">
                         <div v-if="loadIng > 0 || prevId > 0" class="loading" :class="{filled: allMsgs.length === 0}">
@@ -236,7 +237,7 @@
         <div v-if="!isStaticMode && multiSelectMode" class="dialog-multi-select-bar">
             <div class="multi-select-info">
                 <span>{{ $L('已选(*)条', selectedMsgIds.length) }}</span>
-                <span v-if="selectedMsgIds.length >= 100" class="multi-select-max">{{ $L('(最多100条)') }}</span>
+                <span v-if="selectedMsgIds.length >= 100" class="multi-select-max">{{ $L('(最多(*)条)', 100) }}</span>
             </div>
             <div class="multi-select-actions">
                 <Button type="primary" size="small" :disabled="selectedMsgIds.length === 0" @click="onMultiForward">{{ $L('转发') }}</Button>
@@ -460,7 +461,7 @@
             :title="$L('修改资料')"
             :mask-closable="false">
             <Form :model="modifyData" v-bind="formOptions" @submit.native.prevent>
-                <Alert v-if="modifyData.system_name" type="error" style="margin-bottom:18px">{{$L(`正在修改系统机器人：${modifyData.system_name}`)}}</Alert>
+                <Alert v-if="modifyData.system_name" type="error" style="margin-bottom:18px">{{$L('正在修改系统机器人：(*)', modifyData.system_name)}}</Alert>
                 <FormItem prop="avatar" :label="$L('头像')">
                     <ImgUpload v-model="modifyData.avatar" :num="1" :width="512" :height="512" whcut="cover"/>
                 </FormItem>
@@ -471,7 +472,7 @@
                 <template v-if="dialogData.bot == userId">
                     <FormItem v-if="typeof modifyData.clear_day !== 'undefined'" prop="clear_day" :label="$L('消息保留')">
                         <Input v-model="modifyData.clear_day" :maxlength="3" type="number">
-                            <div slot="append">{{$L('天')}}</div>
+                            <div slot="append">{{$L('[day_unit].天')}}</div>
                         </Input>
                     </FormItem>
                     <FormItem v-if="typeof modifyData.webhook_url !== 'undefined'" prop="webhook_url" label="Webhook">
@@ -742,7 +743,7 @@ import touchclick from "../../../directives/touchclick";
 import longpress from "../../../directives/longpress";
 import TransferDom from "../../../directives/transfer-dom";
 import resizeObserver from "../../../directives/resize-observer";
-import {languageList} from "../../../language";
+import {languageList} from "../../../i18n";
 import {isLocalHost} from "../../../components/Replace/utils";
 import emitter from "../../../store/events";
 import Forwarder from "./Forwarder/index.vue";
@@ -978,6 +979,7 @@ export default {
             'dialogMsgs',
             'dialogTodos',
             'dialogMsgTops',
+            'dialogWithdraws',
             'dialogMsgTransfer',
             'dialogMsgKeep',
             'dialogIns',
@@ -1069,6 +1071,13 @@ export default {
             return this.tempMsgs.filter(item => item.dialog_id == this.dialogId);
         },
 
+        withdrawMsgList() {
+            if (!this.isReady) {
+                return [];
+            }
+            return this.dialogWithdraws.filter(item => item.dialog_id == this.dialogId);
+        },
+
         allMsgList() {
             if (this.isStaticMode) {
                 return this.staticMsgs || []
@@ -1086,6 +1095,25 @@ export default {
                 const tempMsgList = this.tempMsgList.filter(item => !ids.includes(item.id) && this.msgFilter(item))
                 if (tempMsgList.length > 0) {
                     array.push(...tempMsgList)
+                }
+            }
+            if (this.withdrawMsgList.length > 0 && !this.msgType && !this.msgId) {
+                const ids = array.map(({id}) => id)
+                const minId = ids.length > 0 ? Math.min(...ids) : 0
+                // 撤回占位仅在已加载消息范围内显示，避免干扰向上翻页的 prev_id 判断
+                const withdrawMsgList = this.withdrawMsgList
+                    .filter(item => !ids.includes(item.id) && (ids.length === 0 || item.id > minId))
+                    .map(item => ({
+                        id: item.id,
+                        dialog_id: item.dialog_id,
+                        prev_id: item.prev_id,
+                        type: 'withdraw',
+                        userid: this.userId,
+                        msg: item.msg,
+                        estimateSize: 42,
+                    }))
+                if (withdrawMsgList.length > 0) {
+                    array.push(...withdrawMsgList)
                 }
             }
             return array.sort((a, b) => {
@@ -1295,7 +1323,7 @@ export default {
             if (unread_one && unread_one < startMsgId) {
                 array.push({
                     type: 'unread',
-                    label: this.$L(`未读消息${not}条`),
+                    label: this.$L('未读消息(*)条', not),
                     msg_id: unread_one
                 })
             }
@@ -1303,7 +1331,7 @@ export default {
                 array.push(...mention_ids.map(msg_id => {
                     return {
                         type: 'mention',
-                        label: this.$L(`@我的消息`),
+                        label: this.$L('@我的消息'),
                         msg_id
                     }
                 }))
@@ -3137,7 +3165,7 @@ export default {
             } else if (this.selectedMsgIds.length < 100) {
                 this.selectedMsgIds.push(msgId);
             } else {
-                $A.messageWarning(this.$L('最多选择100条消息'));
+                $A.messageWarning(this.$L('最多选择(*)条消息', 100));
             }
         },
 
@@ -3751,26 +3779,59 @@ export default {
         },
 
         onWithdraw() {
+            const operateItem = this.operateItem;
             $A.modalConfirm({
                 content: `确定撤回此信息吗？`,
                 okText: '撤回',
                 loading: true,
                 onOk: () => {
                     return new Promise((resolve, reject) => {
+                        // 请求前预存撤回记录：原消息还在列表时占位被去重压制不显示，
+                        // 无论 WS 推送还是接口响应先移除消息，占位都在同一次列表重算中原地顶上，避免先删后加的闪动
+                        const preSaved = operateItem.type === 'text' && !!$A.getObject(operateItem.msg, 'text');
+                        if (preSaved) {
+                            this.$store.dispatch("saveDialogWithdraw", {
+                                id: operateItem.id,
+                                dialog_id: operateItem.dialog_id,
+                                prev_id: operateItem.prev_id,
+                                msg: {
+                                    type: $A.getObject(operateItem.msg, 'type'),
+                                    text: $A.getObject(operateItem.msg, 'text'),
+                                },
+                            });
+                        }
                         this.$store.dispatch("call", {
                             url: 'dialog/msg/withdraw',
                             data: {
-                                msg_id: this.operateItem.id
+                                msg_id: operateItem.id
                             },
                         }).then(() => {
                             resolve("消息已撤回");
-                            this.$store.dispatch("forgetDialogMsg", this.operateItem);
+                            this.$store.dispatch("forgetDialogMsg", operateItem);
                         }).catch(({msg}) => {
                             reject(msg);
+                            // 撤回失败且消息未被删除（排除"接口报错但服务端实际已撤回"）才清除预存记录
+                            if (preSaved && this.dialogMsgs.some(item => item.id == operateItem.id)) {
+                                this.$store.dispatch("forgetDialogWithdraw", {id: operateItem.id});
+                            }
                         });
                     })
                 }
             });
+        },
+
+        onWithdrawReEdit(source) {
+            if (this.operateVisible) {
+                return
+            }
+            this.cancelQuote()
+            const {type, text} = source.msg
+            if (type === 'md') {
+                this.$refs.input.setText(text)
+            } else {
+                this.$refs.input.setContent(text.replace(/\{\{RemoteURL\}\}/g, $A.mainUrl()))
+            }
+            !this.windowTouch && this.inputFocus()
         },
 
         onViewReply(data) {

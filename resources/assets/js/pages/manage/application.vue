@@ -271,7 +271,7 @@
             :title="$L(mybotModifyData.id > 0 ? '修改机器人' : '添加机器人')"
             :mask-closable="false">
             <Form :model="mybotModifyData" v-bind="formOptions" @submit.native.prevent>
-                <Alert v-if="mybotModifyData.system_name" type="error" style="margin-bottom:18px">{{ $L(`正在修改系统机器人：${mybotModifyData.system_name}`) }}</Alert>
+                <Alert v-if="mybotModifyData.system_name" type="error" style="margin-bottom:18px">{{ $L('正在修改系统机器人：(*)', mybotModifyData.system_name) }}</Alert>
                 <FormItem prop="avatar" :label="$L('头像')">
                     <ImgUpload v-model="mybotModifyData.avatar" :num="1" :width="512" :height="512" whcut="cover"/>
                 </FormItem>
@@ -280,7 +280,7 @@
                 </FormItem>
                 <FormItem prop="clear_day" :label="$L('消息保留')">
                     <Input v-model="mybotModifyData.clear_day" :maxlength="3" type="number" :placeholder="$L('默认：90天')">
-                        <div slot="append">{{ $L('天') }}</div>
+                        <div slot="append">{{ $L('[day_unit].天') }}</div>
                     </Input>
                 </FormItem>
                 <FormItem prop="webhook_url" label="Webhook">
@@ -396,7 +396,7 @@
             :title="$L('扫码登录')"
             :mask-closable="false">
             <div class="mobile-scan-login-box">
-                <div class="mobile-scan-login-title">{{ $L(`你好，扫码确认登录`) }}</div>
+                <div class="mobile-scan-login-title">{{ $L('你好，扫码确认登录') }}</div>
                 <div class="mobile-scan-login-subtitle">「{{ $L('为确保帐号安全，请确认是本人操作') }}」</div>
             </div>
             <div slot="footer" class="adaption">

@@ -253,6 +253,10 @@ export default {
         state.cacheDepartmentOwnerIds = $A.normalizeIntArray(data)
         $A.IDBSet("cacheDepartmentOwnerIds", state.cacheDepartmentOwnerIds).catch(() => {});
     },
+    'department/owner/enabled/save': function(state, enabled) {
+        state.departmentOwnerProjectViewEnabled = enabled === true
+        $A.IDBSet("departmentOwnerProjectViewEnabled", state.departmentOwnerProjectViewEnabled).catch(() => {});
+    },
 
     // 文件管理
     'file/push': function(state, data) {
@@ -339,6 +343,25 @@ export default {
         if (index !== -1) {
             state.dialogQuotes.splice(index, 1)
             $A.IDBSave("dialogQuotes", state.dialogQuotes)
+        }
+    },
+
+    // 撤回消息管理（仅本地，用于撤回后重新编辑）
+    'withdraw/set': function(state, data) {
+        const index = state.dialogWithdraws.findIndex(item => item.id === data.id)
+        if (index !== -1) {
+            state.dialogWithdraws.splice(index, 1, data)
+        } else {
+            state.dialogWithdraws.push(data)
+        }
+        $A.IDBSave("dialogWithdraws", state.dialogWithdraws)
+    },
+
+    'withdraw/remove': function(state, id) {
+        const index = state.dialogWithdraws.findIndex(item => item.id === id)
+        if (index !== -1) {
+            state.dialogWithdraws.splice(index, 1)
+            $A.IDBSave("dialogWithdraws", state.dialogWithdraws)
         }
     },
 

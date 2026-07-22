@@ -28,7 +28,7 @@
                 {{$L(source.msg.action === 'remove' ? '取消待办' : (source.msg.action === 'done' ? '完成' : '设待办'))}}
                 "{{$A.getMsgSimpleDesc(source.msg.data)}}"
                 <div v-if="source.msg.action === 'add' && formatTodoUser(source.msg.data).length > 0" class="todo-users">
-                    <span>{{$L('给')}}</span>
+                    <span>{{$L('[todo_target].给')}}</span>
                     <template v-for="(item, index) in formatTodoUser(source.msg.data)">
                         <div v-if="index < 3" class="todo-user"><UserAvatar :userid="item" :show-name="true" :show-icon="false"/></div>
                         <div v-else-if="index == 3" class="todo-user">+{{formatTodoUser(source.msg.data).length - 3}}</div>
@@ -38,6 +38,10 @@
         </div>
         <div v-else-if="source.type === 'notice'" class="dialog-notice">
             {{source.msg.source === 'api' ? source.msg.notice : $L(source.msg.notice)}}
+        </div>
+        <div v-else-if="source.type === 'withdraw'" class="dialog-withdraw">
+            {{$L('你撤回了一条消息')}}
+            <em class="withdraw-re-edit" @click="onWithdrawReEdit">{{$L('重新编辑')}}</em>
         </div>
         <template v-else>
             <div v-if="multiSelectMode && isSelectableMsg" class="dialog-multi-check" @click.stop="onMultiSelectToggle">
@@ -182,7 +186,7 @@ export default {
         },
 
         isSelectableMsg() {
-            return !['tag', 'top', 'todo', 'notice', 'word-chain', 'vote', 'template'].includes(this.source.type);
+            return !['tag', 'top', 'todo', 'notice', 'withdraw', 'word-chain', 'vote', 'template'].includes(this.source.type);
         },
 
         classArray() {
@@ -326,6 +330,10 @@ export default {
 
         onMergeForwardDetail(data) {
             this.dispatch("on-merge-forward-detail", data)
+        },
+
+        onWithdrawReEdit() {
+            this.dispatch("on-withdraw-re-edit", this.source)
         },
 
         dispatch(event, ...arg) {

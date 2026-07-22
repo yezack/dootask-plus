@@ -1,3 +1,5 @@
+name: dootask-plus
+
 services:
   php:
     container_name: "dootask-php-${APP_ID}"
@@ -32,8 +34,6 @@ services:
     networks:
       - extnetwork
     depends_on:
-      mariadb:
-        condition: service_healthy
       redis:
         condition: service_healthy
     restart: unless-stopped
@@ -68,28 +68,6 @@ services:
       - redis_data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-    networks:
-      - extnetwork
-    restart: unless-stopped
-
-  mariadb:
-    container_name: "dootask-mariadb-${APP_ID}"
-    image: "mariadb:10.7.3"
-    volumes:
-      - ./docker/mysql/repassword.sh:/etc/mysql/repassword.sh
-      - ./docker/mysql/conf.d:/etc/mysql/conf.d
-      - ./docker/mysql/data:/var/lib/mysql
-    environment:
-      MYSQL_PREFIX: "${DB_PREFIX}"
-      MYSQL_ROOT_PASSWORD: "${DB_ROOT_PASSWORD}"
-      MYSQL_DATABASE: "${DB_DATABASE}"
-      MYSQL_USER: "${DB_USERNAME}"
-      MYSQL_PASSWORD: "${DB_PASSWORD}"
-    healthcheck:
-      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "${DB_USERNAME}", "-p${DB_PASSWORD}"]
       interval: 5s
       timeout: 5s
       retries: 5

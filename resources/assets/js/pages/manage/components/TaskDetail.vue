@@ -304,7 +304,7 @@
                             <i class="taskfont">&#xe6e6;</i>{{$L('附件')}}
                         </div>
                         <ul class="item-content file">
-                            <li v-if="taskDetail.file_num > 50" class="tip">{{$L(`共${taskDetail.file_num}个文件，仅显示最新50个`)}}</li>
+                            <li v-if="taskDetail.file_num > 50" class="tip">{{$L('共(*)个文件，仅显示最新50个', taskDetail.file_num)}}</li>
                             <li v-for="(file, index) in fileList" :key="index" @click="showFileDropdown(file, $event)">
                                 <img v-if="file.id" class="file-ext" :src="file.thumb"/>
                                 <Loading v-else class="file-load"/>
@@ -529,7 +529,7 @@
                         <template #append>
                             <Select v-model="delayTaskForm.type" style="width:auto">
                                 <Option value="hour">{{$L('小时')}}</Option>
-                                <Option value="day">{{$L('天')}}</Option>
+                                <Option value="day">{{$L('[day_unit].天')}}</Option>
                             </Select>
                         </template>
                     </Input>
@@ -1448,8 +1448,8 @@ export default {
                                 }
                             }
                         }, [
-                            h('span', {slot: 'prepend'}, this.$L('每')),
-                            h('span', {slot: 'append'}, this.$L('天'))
+                            h('span', {slot: 'prepend'}, this.$L('[recurrence_prefix].每')),
+                            h('span', {slot: 'append'}, this.$L('[day_unit].天'))
                         ])
                     ])
                 },
@@ -2141,7 +2141,9 @@ export default {
                 okText: this.$L('立即下载'),
                 content: `${file.name} (${$A.bytesToSize(file.size)})`,
                 onOk: () => {
-                    const departmentOwnerIds = (this.$store.state.cacheDepartmentOwnerIds || []).join(',')
+                    const departmentOwnerIds = this.$store.state.departmentOwnerProjectViewEnabled
+                        ? (this.$store.state.cacheDepartmentOwnerIds || []).join(',')
+                        : ''
                     const url = $A.urlAddParams(`project/task/filedown?file_id=${file.id}`, departmentOwnerIds ? {department_owner_ids: departmentOwnerIds} : {})
                     this.$store.dispatch('downUrl', $A.apiUrl(url))
                 }

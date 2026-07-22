@@ -1,6 +1,6 @@
 # Dootask Plus — 修改文档
 
-基于 [kuaifan/dootask](https://github.com/kuaifan/dootask) v1.8.69。
+基于 [kuaifan/dootask](https://github.com/kuaifan/dootask) v1.8.89。
 
 | 修改 | 说明 |
 |------|------|

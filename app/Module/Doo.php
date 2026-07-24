@@ -21,8 +21,9 @@ class Doo
      */
     public static function load($token = null, $language = null): DooSo
     {
-        if (RequestContext::has(self::DOO_INSTANCE)) {
-            return RequestContext::get(self::DOO_INSTANCE);
+        $instance = RequestContext::get(self::DOO_INSTANCE);
+        if ($instance instanceof DooSo) {
+            return $instance;
         }
 
         $request = request();

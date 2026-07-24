@@ -17,6 +17,9 @@ class RequestContext
     /** @var string 请求ID前缀 */
     private const REQUEST_ID_PREFIX = 'req';
 
+    /** @var string Swoole 协程上下文中的请求ID键 */
+    private const COROUTINE_CONTEXT_KEY = 'dootask_request_id';
+
     /** @var int 上下文的TTL（生存时间） */
     private const TTL_SECONDS = 3600;  // 上下文 TTL 为 1 小时
 
@@ -44,17 +47,39 @@ class RequestContext
             return $requestId;
         }
 
-        // 尝试从当前请求获取
-        $request = request();
-        if ($request && method_exists($request, 'attributes') && $request->attributes) {
-            if (!$request->attributes->has(static::CONTEXT_KEY)) {
-                $request->attributes->set(static::CONTEXT_KEY, self::generateRequestId());
+        // Swoole 开启协程后完全使用协程本地ID，避免全局 request() 切换导致串扰
+        $coroutineContext = self::getCoroutineContext();
+        if ($coroutineContext) {
+            if (!isset($coroutineContext[self::COROUTINE_CONTEXT_KEY])) {
+                $coroutineContext[self::COROUTINE_CONTEXT_KEY] = self::generateRequestId();
             }
-            return $request->attributes->get(static::CONTEXT_KEY);
+            return $coroutineContext[self::COROUTINE_CONTEXT_KEY];
         }
 
-        // 如果没有请求上下文，生成一个新的请求ID
+        // Symfony Request 的 attributes 是公开属性，不是方法
+        $request = request();
+        if ($request instanceof Request && $request->attributes) {
+            if (!$request->attributes->has(self::CONTEXT_KEY)) {
+                $request->attributes->set(self::CONTEXT_KEY, self::generateRequestId());
+            }
+            return $request->attributes->get(self::CONTEXT_KEY);
+        }
+
+        // CLI 等无 HTTP Request、无协程场景生成独立上下文ID；调用方可显式传递ID复用
         return self::generateRequestId();
+    }
+
+    /**
+     * 获取当前 Swoole 协程上下文；非协程环境返回 null
+     */
+    private static function getCoroutineContext(): ?\ArrayObject
+    {
+        if (!class_exists(Coroutine::class) || Coroutine::getCid() < 0) {
+            return null;
+        }
+
+        $context = Coroutine::getContext();
+        return $context instanceof \ArrayObject ? $context : null;
     }
 
     /**
@@ -209,6 +234,16 @@ class RequestContext
         }
 
         unset(self::$context[$requestId]);
+
+        $coroutineContext = self::getCoroutineContext();
+        if ($coroutineContext && ($coroutineContext[self::COROUTINE_CONTEXT_KEY] ?? null) === $requestId) {
+            unset($coroutineContext[self::COROUTINE_CONTEXT_KEY]);
+        }
+
+        $request = request();
+        if ($request instanceof Request && $request->attributes->get(self::CONTEXT_KEY) === $requestId) {
+            $request->attributes->remove(self::CONTEXT_KEY);
+        }
     }
 
     /** ***************************************************************************************** */

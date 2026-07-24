@@ -11,5 +11,5 @@ if [ "$debug" = "true" ]; then
     ./bin/inotify ./app
 else
     echo "[MODE] production"
-    php bin/laravels start -i
+    exec php bin/laravels start -i
 fi

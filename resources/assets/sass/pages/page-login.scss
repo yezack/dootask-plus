@@ -83,6 +83,30 @@
                 padding: 0 12px;
                 color: #AAAAAA;
             }
+            .login-uniauth {
+                margin: 26px 40px 0;
+                text-align: center;
+                .login-uniauth-divider {
+                    display: flex;
+                    align-items: center;
+                    margin-top: 22px;
+                    color: #aaaaaa;
+                    &:before,
+                    &:after {
+                        content: "";
+                        flex: 1;
+                        height: 1px;
+                        background-color: #eeeeee;
+                    }
+                    > span {
+                        padding: 0 12px;
+                    }
+                }
+                .login-emergency {
+                    display: inline-block;
+                    margin-top: 18px;
+                }
+            }
             .login-qrcode {
                 display: flex;
                 align-items: center;
@@ -237,6 +261,10 @@ body.window-portrait {
 
                 .login-subtitle {
                     margin-top: 4px;
+                }
+
+                .login-uniauth {
+                    margin: 20px 36px 0;
                 }
 
                 .login-access {

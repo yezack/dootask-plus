@@ -4,7 +4,7 @@
         <div class="login-body">
             <div class="login-logo no-dark-content"></div>
             <div class="login-box">
-                <div class="login-mode-switch">
+                <div v-if="localLoginVisible" class="login-mode-switch">
                     <div class="login-mode-switch-box">
                         <ETooltip :disabled="$isEEUIApp || windowTouch" :content="$L(loginMode=='qrcode' ? '帐号登录' : '扫码登录')" placement="left">
                             <span class="login-mode-switch-icon no-dark-content" @click="switchLoginMode">
@@ -19,6 +19,12 @@
 
                 <div class="login-subtitle">{{$L(subTitle)}}</div>
 
+                <div v-if="uniauthVisible" class="login-uniauth">
+                    <Button :type="localLoginVisible ? 'default' : 'primary'" size="large" long @click="onUniAuthLogin">{{$L('统一身份登录')}}</Button>
+                    <div v-if="localLoginVisible" class="login-uniauth-divider"><span>{{$L('或使用本地帐号登录')}}</span></div>
+                    <a v-else class="login-emergency" href="javascript:void(0)" @click="showEmergencyLogin">{{$L('管理员应急登录')}}</a>
+                </div>
+
                 <transition name="login-mode">
                     <div v-if="loginMode=='qrcode'" class="login-qrcode" @click="qrcodeRefresh">
                         <VueQrcode :value="qrcodeUrl" :options="{width:200,margin:2}"></VueQrcode>
@@ -26,7 +32,7 @@
                 </transition>
                 <transition name="login-mode">
                     <div
-                        v-if="loginMode=='access'"
+                        v-if="loginMode=='access' && localLoginVisible"
                         class="login-access">
                         <Input
                             v-if="$isSoftware && cacheServerUrl"
@@ -104,7 +110,7 @@
                     </div>
                 </transition>
             </div>
-            <div class="login-bottom">
+            <div v-if="localLoginVisible" class="login-bottom">
                 <Dropdown trigger="click" placement="bottom-start">
                     <div class="login-setting">
                         {{$L('设置')}}
@@ -191,6 +197,7 @@ export default {
             loginMode: 'access',
             loginType: 'login',
             loginJump: false,
+            emergencyLoginVisible: false,
 
             email: '',
             password: '',
@@ -226,7 +233,13 @@ export default {
 
     activated() {
         this.loginType = this.$route.query.type === 'reg' ? 'reg' : 'login'
-        //
+        this.emergencyLoginVisible = false
+        if (this.$route.query.uniauth_error) {
+            $A.messageError("统一身份登录失败，请稍后重试。")
+            const query = {...this.$route.query}
+            delete query.uniauth_error
+            this.$router.replace({name: this.$route.name, query}).catch(_ => {})
+        }
         this.getDemoAccount();
     },
 
@@ -250,6 +263,14 @@ export default {
             return languageList[languageName] || 'Language'
         },
 
+        uniauthVisible() {
+            return !this.$isSoftware && !this.$isEEUIApp && window.systemInfo.uniauthEnabled === true
+        },
+
+        localLoginVisible() {
+            return !this.uniauthVisible || window.systemInfo.uniauthLocalLoginAllowed !== false || this.emergencyLoginVisible
+        },
+
         welcomeTitle() {
             if (this.loginMode == 'qrcode') {
                 return this.$L("扫码登录")
@@ -265,6 +286,9 @@ export default {
             }
             if (this.loginType=='reg') {
                 return this.$L('输入您的信息以创建帐户。')
+            }
+            if (this.uniauthVisible && !this.localLoginVisible) {
+                return this.$L('使用统一身份认证访问您的帐户。')
             }
             return this.$L('输入您的凭证以访问您的帐户。')
         },
@@ -303,6 +327,40 @@ export default {
     methods: {
         setTheme(mode) {
             this.$store.dispatch("setTheme", mode)
+        },
+
+        safeFrom(value) {
+            if (typeof value !== 'string' || !value) {
+                return ''
+            }
+            if (!value.startsWith('/') && !/^https?:\/\//i.test(value)) {
+                try {
+                    value = decodeURIComponent(value)
+                } catch (_) {
+                    return ''
+                }
+            }
+            if (/[\u0000-\u001f\u007f\\]/.test(value) || /^\/\//.test(value)) {
+                return ''
+            }
+            try {
+                const url = new URL(value, window.location.origin)
+                if (url.origin !== window.location.origin || !/^https?:$/.test(url.protocol) || url.username || url.password) {
+                    return ''
+                }
+                return `${url.pathname}${url.search}${url.hash}`
+            } catch (_) {
+                return ''
+            }
+        },
+
+        onUniAuthLogin() {
+            const fromUrl = this.safeFrom(this.$route.query.from)
+            window.location.assign('/api/uniauth/login' + (fromUrl ? `?from=${encodeURIComponent(fromUrl)}` : ''))
+        },
+
+        showEmergencyLogin() {
+            this.emergencyLoginVisible = true
         },
 
         getDemoAccount() {
@@ -583,7 +641,7 @@ export default {
 
         goNext() {
             this.loginJump = true
-            const fromUrl = decodeURIComponent($A.getObject(this.$route.query, 'from'))
+            const fromUrl = this.safeFrom(this.$route.query.from)
             if (fromUrl) {
                 $A.IDBSet("clearCache", "login").then(_ => {
                     window.location.replace(fromUrl)

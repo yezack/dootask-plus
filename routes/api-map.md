@@ -2,15 +2,23 @@
 
 > 此文件由 `php artisan doc:api-map` 生成，勿手改。
 
-接口总数：314
+接口总数：318
 
 ## 路由规则
 
-API 使用动态路由（见 `routes/web.php`），URL 段映射为控制器方法名：
+API 路由定义见 `routes/web.php`：
 
-- `api/{controller}/{method}` → `{method}()`，如 `api/project/lists` → `ProjectController::lists()`
-- `api/{controller}/{method}/{action}` → `{method}__{action}()`（双下划线连接），如 `api/project/invite/join` → `ProjectController::invite__join()`
-- 路由最多两段，方法名最多一个双下划线
+- 动态路由 `api/{controller}/{method}` → `{method}()`，如 `api/project/lists` → `ProjectController::lists()`
+- 动态路由 `api/{controller}/{method}/{action}` → `{method}__{action}()`（双下划线连接），如 `api/project/invite/join` → `ProjectController::invite__join()`
+- 安全敏感或需要固定 HTTP Method 的接口可使用显式控制器动作路由，并按注册的 URI 与 HTTP Method 输出
+
+## uniauth（UniAuthController）
+
+| URL | 方法名 | HTTP | 说明 |
+| --- | --- | --- | --- |
+| api/uniauth/login | login() | get | 发起统一身份登录 |
+| api/uniauth/callback | callback() | get | 处理统一身份登录回调 |
+| api/uniauth/exchange | exchange() | post | 交换一次性登录票据 |
 
 ## users（UsersController）
 
@@ -400,3 +408,9 @@ API 使用动态路由（见 `routes/web.php`），URL 段映射为控制器方�
 
 | URL | 方法名 | HTTP | 说明 |
 | --- | --- | --- | --- |
+
+## scim（ScimWebhookController）
+
+| URL | 方法名 | HTTP | 说明 |
+| --- | --- | --- | --- |
+| api/scim/webhook | __invoke() | post |  |

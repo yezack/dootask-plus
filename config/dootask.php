@@ -51,6 +51,26 @@ return [
     // 在线授权：冻结（租约过期）后到吊销的宽限天数（OnlineLicense）
     'online_license_grace_days' => env('ONLINE_LICENSE_GRACE_DAYS', 14),
 
+    // UniAuthSync Web OIDC 登录
+    'uniauth' => [
+        'enabled' => env('UNIAUTH_ENABLED', false),
+        'allow_local_login' => env('UNIAUTH_ALLOW_LOCAL_LOGIN', true),
+        'allow_insecure_http' => env('UNIAUTH_ALLOW_INSECURE_HTTP', false),
+        'cache_store' => env('UNIAUTH_CACHE_STORE', 'redis'),
+        'scim_server_url' => env('SCIM_SERVER_URL', ''),
+        'scim_client_id' => env('SCIM_CLIENT_ID', ''),
+        'scim_client_secret' => env('SCIM_CLIENT_SECRET', ''),
+        'issuer' => env('UNIAUTH_ISSUER', ''),
+        'client_id' => env('UNIAUTH_CLIENT_ID', env('SCIM_CLIENT_ID', '')),
+        'client_secret' => env('UNIAUTH_CLIENT_SECRET', env('SCIM_CLIENT_SECRET', '')),
+        'redirect_uri' => env('UNIAUTH_REDIRECT_URI', ''),
+        'scopes' => env('UNIAUTH_SCOPES', 'openid profile email'),
+        'http_timeout' => env('UNIAUTH_HTTP_TIMEOUT', 30),
+        'jwks_cache_seconds' => env('UNIAUTH_JWKS_CACHE_SECONDS', 3600),
+        'state_ttl_seconds' => env('UNIAUTH_STATE_TTL_SECONDS', 600),
+        'ticket_ttl_seconds' => env('UNIAUTH_TICKET_TTL_SECONDS', 60),
+    ],
+
     // SCIM / UniAuthSync 用户同步
     'scim' => [
         'server_url' => env('SCIM_SERVER_URL', ''),

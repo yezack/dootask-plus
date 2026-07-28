@@ -17,6 +17,7 @@ use App\Http\Controllers\Api\SearchController;
 use App\Http\Controllers\Api\AppsController;
 use App\Http\Controllers\Api\UploadController;
 use App\Http\Controllers\Api\DashboardController;
+use App\Http\Controllers\Api\UniAuthController;
 
 /*
 |--------------------------------------------------------------------------
@@ -34,6 +35,13 @@ use App\Http\Controllers\Api\DashboardController;
  * 接口
  */
 Route::prefix('api')->middleware(['webapi'])->group(function () {
+    // UniAuth Web OIDC
+    Route::middleware('throttle:api')->group(function () {
+        Route::get('uniauth/login', [UniAuthController::class, 'login']);
+        Route::get('uniauth/callback', [UniAuthController::class, 'callback']);
+        Route::post('uniauth/exchange', [UniAuthController::class, 'exchange']);
+    });
+
     // 会员
     Route::any('users/{method}',                        UsersController::class);
     Route::any('users/{method}/{action}',               UsersController::class);

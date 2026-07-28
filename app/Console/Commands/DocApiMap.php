@@ -22,8 +22,12 @@ class DocApiMap extends Command
 
         $total = 0;
         $sections = [];
-        foreach ($controllers as $prefix => $class) {
-            $rows = $this->collectMethods($prefix, $class);
+        foreach ($controllers as $prefix => $definition) {
+            $class = $definition['class'];
+            $rows = $definition['dynamic']
+                ? $this->collectMethods($prefix, $class)
+                : [];
+            $rows = array_merge($rows, $definition['explicit']);
             $total += count($rows);
             $sections[] = $this->renderSection($prefix, $class, $rows);
         }
@@ -36,22 +40,62 @@ class DocApiMap extends Command
     }
 
     /**
-     * 从已注册路由中收集 api 前缀与控制器的映射
-     * 匹配 routes/web.php 中的动态路由：api/{prefix}/{method}
-     * @return array [prefix => 控制器类名]
+     * 从已注册路由中收集 API 控制器。
+     * 同时支持动态路由 api/{prefix}/{method} 和显式控制器动作路由。
+     *
+     * @return array<string, array{class: class-string, dynamic: bool, explicit: array}>
      */
     private function collectControllers(): array
     {
         $controllers = [];
         foreach (Route::getRoutes() as $route) {
-            if (!preg_match('/^api\/(\w+)\/\{method}$/', $route->uri())) {
+            if (!preg_match('/^api\/([^\/]+)\//', $route->uri(), $prefixMatch)) {
                 continue;
             }
-            preg_match('/^api\/(\w+)\/\{method}$/', $route->uri(), $match);
-            $class = $route->getAction('controller');
-            if ($class && class_exists($class)) {
-                $controllers[$match[1]] = $class;
+
+            $prefix = $prefixMatch[1];
+            if ($route->uri() === "api/{$prefix}/{method}") {
+                $class = $route->getAction('controller');
+                if (is_string($class) && class_exists($class)) {
+                    $controllers[$prefix] ??= [
+                        'class' => $class,
+                        'dynamic' => false,
+                        'explicit' => [],
+                    ];
+                    $controllers[$prefix]['class'] = $class;
+                    $controllers[$prefix]['dynamic'] = true;
+                }
+                continue;
             }
+
+            if (str_contains($route->uri(), '{')) {
+                continue;
+            }
+
+            $action = $route->getActionName();
+            if (!str_contains($action, '@')) {
+                continue;
+            }
+            [$class, $method] = explode('@', $action, 2);
+            if (!class_exists($class) || !method_exists($class, $method)) {
+                continue;
+            }
+
+            $controllers[$prefix] ??= [
+                'class' => $class,
+                'dynamic' => false,
+                'explicit' => [],
+            ];
+
+            $reflection = new ReflectionMethod($class, $method);
+            [, $title] = $this->parseApiDoc($reflection);
+            $httpMethods = array_values(array_diff($route->methods(), ['HEAD']));
+            $controllers[$prefix]['explicit'][] = [
+                'url' => $route->uri(),
+                'method' => $method . '()',
+                'http' => strtolower(implode('|', $httpMethods)),
+                'title' => $title,
+            ];
         }
         return $controllers;
     }
@@ -112,11 +156,11 @@ class DocApiMap extends Command
 
             ## 路由规则
 
-            API 使用动态路由（见 `routes/web.php`），URL 段映射为控制器方法名：
+            API 路由定义见 `routes/web.php`：
 
-            - `api/{controller}/{method}` → `{method}()`，如 `api/project/lists` → `ProjectController::lists()`
-            - `api/{controller}/{method}/{action}` → `{method}__{action}()`（双下划线连接），如 `api/project/invite/join` → `ProjectController::invite__join()`
-            - 路由最多两段，方法名最多一个双下划线
+            - 动态路由 `api/{controller}/{method}` → `{method}()`，如 `api/project/lists` → `ProjectController::lists()`
+            - 动态路由 `api/{controller}/{method}/{action}` → `{method}__{action}()`（双下划线连接），如 `api/project/invite/join` → `ProjectController::invite__join()`
+            - 安全敏感或需要固定 HTTP Method 的接口可使用显式控制器动作路由，并按注册的 URI 与 HTTP Method 输出
 
 
             MD;

@@ -38326,5 +38326,77 @@
         "fr": "Aucune donnée de service à afficher",
         "id": "Tidak ada data departemen yang dapat dilihat",
         "ru": "Нет данных отдела для просмотра"
+    },
+    {
+        "key": "统一身份登录",
+        "zh": "",
+        "zh-CHT": "統一身分登入",
+        "en": "Single Sign-On",
+        "ko": "통합 인증 로그인",
+        "ja": "統合認証ログイン",
+        "de": "Single Sign-On",
+        "fr": "Authentification unique",
+        "id": "Masuk dengan identitas terpadu",
+        "ru": "Единый вход"
+    },
+    {
+        "key": "或使用本地帐号登录",
+        "zh": "",
+        "zh-CHT": "或使用本機帳號登入",
+        "en": "Or sign in with a local account",
+        "ko": "또는 로컬 계정으로 로그인",
+        "ja": "またはローカルアカウントでログイン",
+        "de": "Oder mit einem lokalen Konto anmelden",
+        "fr": "Ou se connecter avec un compte local",
+        "id": "Atau masuk dengan akun lokal",
+        "ru": "Или войти с локальной учетной записью"
+    },
+    {
+        "key": "管理员应急登录",
+        "zh": "",
+        "zh-CHT": "管理員緊急登入",
+        "en": "Administrator emergency login",
+        "ko": "관리자 긴급 로그인",
+        "ja": "管理者緊急ログイン",
+        "de": "Administrator-Notfallanmeldung",
+        "fr": "Connexion d’urgence administrateur",
+        "id": "Login darurat administrator",
+        "ru": "Аварийный вход администратора"
+    },
+    {
+        "key": "使用统一身份认证访问您的帐户。",
+        "zh": "",
+        "zh-CHT": "使用統一身分驗證存取您的帳戶。",
+        "en": "Use single sign-on to access your account.",
+        "ko": "통합 인증을 사용하여 계정에 액세스하세요.",
+        "ja": "統合認証を使用してアカウントにアクセスします。",
+        "de": "Verwenden Sie Single Sign-On, um auf Ihr Konto zuzugreifen.",
+        "fr": "Utilisez l’authentification unique pour accéder à votre compte.",
+        "id": "Gunakan autentikasi terpadu untuk mengakses akun Anda.",
+        "ru": "Используйте единый вход для доступа к своей учетной записи."
+    },
+    {
+        "key": "统一身份登录失败，请稍后重试。",
+        "zh": "",
+        "zh-CHT": "統一身分登入失敗，請稍後再試。",
+        "en": "Single sign-on failed. Please try again later.",
+        "ko": "통합 인증 로그인에 실패했습니다. 나중에 다시 시도하세요.",
+        "ja": "統合認証ログインに失敗しました。しばらくしてからもう一度お試しください。",
+        "de": "Single Sign-On fehlgeschlagen. Bitte versuchen Sie es später erneut.",
+        "fr": "Échec de l’authentification unique. Veuillez réessayer plus tard.",
+        "id": "Login dengan autentikasi terpadu gagal. Silakan coba lagi nanti.",
+        "ru": "Не удалось выполнить единый вход. Повторите попытку позже."
+    },
+    {
+        "key": "登录失败，请稍后重试。",
+        "zh": "",
+        "zh-CHT": "登入失敗，請稍後再試。",
+        "en": "Login failed. Please try again later.",
+        "ko": "로그인에 실패했습니다. 나중에 다시 시도하세요.",
+        "ja": "ログインに失敗しました。しばらくしてからもう一度お試しください。",
+        "de": "Anmeldung fehlgeschlagen. Bitte versuchen Sie es später erneut.",
+        "fr": "Échec de la connexion. Veuillez réessayer plus tard.",
+        "id": "Login gagal. Silakan coba lagi nanti.",
+        "ru": "Не удалось войти. Повторите попытку позже."
     }
 ]

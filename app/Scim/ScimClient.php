@@ -90,9 +90,17 @@ class ScimClient
         } while ($index <= $total);
     }
 
+    public function getUserById(string $id): array
+    {
+        if ($id === '' || preg_match('/[\x00-\x1F\x7F]/', $id)) {
+            throw new \InvalidArgumentException('SCIM 用户 ID 无效');
+        }
+        return $this->getUserByUri('/Users/' . rawurlencode($id));
+    }
+
     public function getUserByUri(string $uri): array
     {
-        if (!preg_match('#^/Users/[A-Za-z0-9._~-]+$#', $uri)) {
+        if (!preg_match('#^/Users/[A-Za-z0-9._~%+-]+$#', $uri)) {
             throw new \InvalidArgumentException('SCIM 用户 URI 无效');
         }
 

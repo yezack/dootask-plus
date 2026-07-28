@@ -27,7 +27,9 @@
             version: "{{ $version }}",
             origin: window.location.origin + "/",
             homeUrl: null,
-            apiUrl: null
+            apiUrl: null,
+            uniauthEnabled: @json((bool) config('dootask.uniauth.enabled')),
+            uniauthLocalLoginAllowed: @json((bool) config('dootask.uniauth.allow_local_login', true))
         };
     </script>
 </head>

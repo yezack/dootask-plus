@@ -78,7 +78,12 @@ class UsersController extends AbstractController
         $email = trim(Request::input('email'));
         $password = trim(Request::input('password'));
         $isRegVerify = Base::settingFind('emailSetting', 'reg_verify') === 'open';
+        $localLoginRestricted = config('dootask.uniauth.enabled')
+            && !config('dootask.uniauth.allow_local_login', true);
         if ($type == 'reg') {
+            if ($localLoginRestricted) {
+                return Base::retError('未开放注册');
+            }
             if (mb_strlen($email) > 32 || mb_strlen($password) > 32) {
                 return Base::retError('账号密码最多可输入32位字符');
             }
@@ -145,6 +150,9 @@ class UsersController extends AbstractController
             //
             if ($user->isDisable()) {
                 return $retError('帐号已停用...');
+            }
+            if ($localLoginRestricted && !$user->isAdmin()) {
+                return $retError('仅管理员可使用本地应急登录');
             }
             Cache::forget("code::" . $email);
             if ($isRegVerify && $user->email_verity === 0) {

@@ -22,7 +22,11 @@ class ScimUserMapper
      * @param array $scimUser SCIM 接口返回的原始用户数据
      * @return string  'created' | 'updated' | 'skipped' | 'failed'
      */
-    public static function sync(array $scimUser): string
+    public static function sync(
+        array $scimUser,
+        ?array $groupDepartmentIds = null,
+        bool $allowWithoutDepartment = false
+    ): string
     {
         $email = self::extractEmail($scimUser);
         if (empty($email)) {
@@ -31,7 +35,12 @@ class ScimUserMapper
         }
 
         $attrs = self::map($scimUser);
-        $user = User::whereEmail($email)->first();
+        $localUsers = User::whereEmail($email)->get();
+        if ($localUsers->count() > 1) {
+            Log::error('SCIM: 本地邮箱匹配不唯一', ['email' => $email, 'matches' => $localUsers->count()]);
+            return 'failed';
+        }
+        $user = $localUsers->first();
 
         // 停用优先于资料校验，避免异常资料阻断离职/删除事件。
         if ($attrs['disable_at']) {
@@ -63,9 +72,23 @@ class ScimUserMapper
             return 'failed';
         }
 
+        $departmentIds = config('dootask.scim.sync_department', true)
+            ? self::resolveDepartmentIds($attrs['direct_group_ids'], $groupDepartmentIds)
+            : [];
+        if (!$allowWithoutDepartment
+            && config('dootask.scim.sync_department', true)
+            && config('dootask.scim.require_department', true)
+            && $departmentIds === []) {
+            Log::error('SCIM: 用户没有可用的直接分组部门映射', [
+                'email' => $email,
+                'direct_group_ids' => $attrs['direct_group_ids'],
+            ]);
+            return 'failed';
+        }
+
         if ($user) {
             try {
-                return self::updateUser($user, $attrs, $email);
+                return self::updateUser($user, $attrs, $departmentIds, $email);
             } catch (\Throwable $e) {
                 Log::error('SCIM: 更新用户失败', ['email' => $email, 'error' => $e->getMessage()]);
                 return 'failed';
@@ -82,9 +105,7 @@ class ScimUserMapper
             'changePass'  => true,
             'emailVerity' => false,
             'profession'  => $attrs['profession'] ?? '',
-            'department'  => config('dootask.scim.sync_department', true)
-                ? self::resolveDepartmentIds($attrs['department'])
-                : [],
+            'department'  => $departmentIds,
         ];
         try {
             $user = User::createByAdmin($email, $password, $attrs['nickname'], $options);
@@ -127,13 +148,25 @@ class ScimUserMapper
         // profession = "身份 - 职务"（如 "警察 - 中队长"）
         $profession = implode(' - ', array_filter([$identityName, $positionName])) ?: null;
 
-        // department = org name（松江分局）
         $department = self::trimScalar($enterprise['department'] ?? '');
+        $directGroupIds = [];
+        $groups = is_array($scimUser['groups'] ?? null) ? $scimUser['groups'] : [];
+        foreach ($groups as $group) {
+            if (!is_array($group) || self::trimScalar($group['type'] ?? '') !== 'direct') {
+                continue;
+            }
+            $groupId = self::trimScalar($group['value'] ?? '');
+            if ($groupId !== '') {
+                $directGroupIds[] = $groupId;
+            }
+        }
+        $directGroupIds = array_values(array_unique($directGroupIds));
 
         return [
             'nickname'   => self::trimScalar($scimUser['displayName'] ?? $scimUser['userName'] ?? ''),
             'profession' => $profession,
             'department' => $department,
+            'direct_group_ids' => $directGroupIds,
             'tel'        => self::trimScalar($custom['phone'] ?? ''),
             'disable_at' => ($scimUser['active'] ?? true) === false ? now() : null,
             // 保留原始数据用于日志/扩展
@@ -152,18 +185,51 @@ class ScimUserMapper
 
     // ---------- helpers ----------
 
-    public static function extractEmail(array $scimUser): string
+    /**
+     * 负责人等强关系使用：必须存在且只能存在一个 primary email。
+     */
+    public static function extractPrimaryEmail(array $scimUser): string
     {
-        $emails = $scimUser['emails'] ?? [];
-        $emails = is_array($emails) ? $emails : [];
-        foreach ($emails as $e) {
-            if (!is_array($e)) {
+        $emails = is_array($scimUser['emails'] ?? null) ? $scimUser['emails'] : [];
+        $primary = [];
+        foreach ($emails as $email) {
+            if (!is_array($email) || ($email['primary'] ?? false) !== true) {
                 continue;
             }
-            $value = self::trimScalar($e['value'] ?? '');
+            $value = strtolower(self::trimScalar($email['value'] ?? ''));
             if ($value !== '' && Base::isEmail($value)) {
-                return $value;
+                $primary[$value] = true;
             }
+        }
+        return count($primary) === 1 ? array_key_first($primary) : '';
+    }
+
+    public static function extractEmail(array $scimUser): string
+    {
+        $emails = is_array($scimUser['emails'] ?? null) ? $scimUser['emails'] : [];
+        $valid = [];
+        $primary = [];
+        foreach ($emails as $email) {
+            if (!is_array($email)) {
+                continue;
+            }
+            $value = strtolower(self::trimScalar($email['value'] ?? ''));
+            if ($value === '' || !Base::isEmail($value)) {
+                continue;
+            }
+            $valid[$value] = true;
+            if (($email['primary'] ?? false) === true) {
+                $primary[$value] = true;
+            }
+        }
+        if (count($primary) === 1) {
+            return array_key_first($primary);
+        }
+        if (count($primary) > 1 || count($valid) > 1) {
+            return '';
+        }
+        if (count($valid) === 1) {
+            return array_key_first($valid);
         }
         // fallback: userName + 默认域名
         $userName = self::trimScalar($scimUser['userName'] ?? '');
@@ -179,11 +245,8 @@ class ScimUserMapper
         return is_scalar($value) ? trim((string)$value) : '';
     }
 
-    private static function updateUser(User $user, array $attrs, string $email): string
+    private static function updateUser(User $user, array $attrs, array $departmentIds, string $email): string
     {
-        $departmentIds = config('dootask.scim.sync_department', true)
-            ? self::resolveDepartmentIds($attrs['department'])
-            : [];
         $oldDepartmentIds = $user->department;
         $changed = false;
 
@@ -256,19 +319,18 @@ class ScimUserMapper
         return 'updated';
     }
 
-    private static function resolveDepartmentIds(string $name): array
+    private static function resolveDepartmentIds(array $directGroupIds, ?array $groupDepartmentIds): array
     {
-        $name = trim($name);
-        if ($name === '') {
-            return [];
+        $departmentIds = [];
+        foreach ($directGroupIds as $groupId) {
+            $departmentId = (int)($groupDepartmentIds[$groupId]
+                ?? ScimDepartmentSynchronizer::cachedGroupDepartmentId($groupId)
+                ?? 0);
+            if ($departmentId > 0 && UserDepartment::whereId($departmentId)->exists()) {
+                $departmentIds[] = $departmentId;
+            }
         }
-
-        $departments = UserDepartment::whereName($name)->get(['id']);
-        if ($departments->count() !== 1) {
-            Log::warning('SCIM: 部门名无法唯一匹配', ['name' => $name, 'matches' => $departments->count()]);
-            return [];
-        }
-        return [(int)$departments->first()->id];
+        return array_values(array_unique($departmentIds));
     }
 
     private static function syncDepartmentGroups(int $userid, array $oldIds, array $newIds): void

@@ -82,6 +82,10 @@ return [
         'webhook_secret' => env('SCIM_WEBHOOK_SECRET', ''),
         'default_password_prefix' => env('SCIM_DEFAULT_PASSWORD_PREFIX', ''),
         'sync_department' => env('SCIM_SYNC_DEPARTMENT', true),
+        'require_department' => env('SCIM_REQUIRE_DEPARTMENT', true),
+        // 仅用于 SCIM 授权范围在 DooTask 中形成的顶层 Organization 部门。
+        // 非顶层 Group 必须使用 SCIM Groups[].owners，禁止由系统管理员兜底。
+        'root_department_owner_email' => env('SCIM_ROOT_DEPARTMENT_OWNER_EMAIL', ''),
         'replace_departments' => env('SCIM_REPLACE_DEPARTMENTS', false),
         'reactivate_users' => env('SCIM_REACTIVATE_USERS', false),
     ],

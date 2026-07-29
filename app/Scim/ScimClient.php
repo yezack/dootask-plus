@@ -9,7 +9,7 @@ use Illuminate\Support\Facades\Http;
 /**
  * SCIM HTTP 客户端 — 对接 UniAuthSync
  *
- * 负责 OAuth token 获取、SCIM Users 拉取、分页遍历。
+ * 负责 OAuth token 获取、SCIM Users / Groups / Organizations 拉取、分页遍历。
  * Token 缓存到 Laravel Cache，失效前 60 秒自动刷新。
  */
 class ScimClient
@@ -70,24 +70,49 @@ class ScimClient
      */
     public function listUsers(): \Generator
     {
-        $index  = 1;
-        $count  = 100;
+        yield from $this->listResources('/scim/v2/Users', 'Users');
+    }
 
-        do {
-            $resp = $this->get('/scim/v2/Users', [
-                'startIndex' => $index,
-                'count'      => $count,
-            ]);
-            if (!$resp->successful()) {
-                throw new \RuntimeException('SCIM Users 拉取失败: ' . $resp->body());
-            }
-            $data = $resp->json();
-            foreach ($data['Resources'] ?? [] as $user) {
-                yield $user;
-            }
-            $total = (int)($data['totalResults'] ?? 0);
-            $index += $count;
-        } while ($index <= $total);
+    /**
+     * 分页遍历授权范围内的 SCIM Groups
+     * @return \Generator<array>
+     */
+    public function listGroups(): \Generator
+    {
+        yield from $this->listResources('/scim/v2/Groups', 'Groups');
+    }
+
+    /**
+     * 分页遍历授权范围内的 SCIM Organizations
+     * @return \Generator<array>
+     */
+    public function listOrganizations(): \Generator
+    {
+        yield from $this->listResources('/scim/v2/Organizations', 'Organizations');
+    }
+
+    public function findUserByEmail(string $email): ?array
+    {
+        if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            throw new \InvalidArgumentException('SCIM 用户邮箱无效');
+        }
+
+        $resp = $this->get('/scim/v2/Users', [
+            'filter' => 'email eq "' . $email . '"',
+            'startIndex' => 1,
+            'count' => 2,
+        ]);
+        if (!$resp->successful()) {
+            throw new \RuntimeException('SCIM 用户查询失败: ' . $resp->body());
+        }
+        $data = $resp->json();
+        $resources = is_array($data) && is_array($data['Resources'] ?? null)
+            ? $data['Resources']
+            : null;
+        if ($resources === null || count($resources) > 1) {
+            throw new \RuntimeException('SCIM 用户邮箱查询结果不唯一或格式错误');
+        }
+        return $resources[0] ?? null;
     }
 
     public function getUserById(string $id): array
@@ -103,17 +128,76 @@ class ScimClient
         if (!preg_match('#^/Users/[A-Za-z0-9._~%+-]+$#', $uri)) {
             throw new \InvalidArgumentException('SCIM 用户 URI 无效');
         }
+        return $this->getResource('/scim/v2' . $uri, '用户');
+    }
 
-        $resp = $this->get('/scim/v2' . $uri);
+    public function getGroupById(string $id): array
+    {
+        return $this->getResourceById('/scim/v2/Groups', $id, '分组');
+    }
+
+    public function getOrganizationById(string $id): array
+    {
+        return $this->getResourceById('/scim/v2/Organizations', $id, '组织');
+    }
+
+    /**
+     * @return \Generator<array>
+     */
+    private function listResources(string $path, string $label): \Generator
+    {
+        $index = 1;
+        $count = 100;
+
+        do {
+            $resp = $this->get($path, [
+                'startIndex' => $index,
+                'count' => $count,
+            ]);
+            if (!$resp->successful()) {
+                throw new \RuntimeException("SCIM {$label} 拉取失败: " . $resp->body());
+            }
+
+            $data = $resp->json();
+            if (!is_array($data) || !isset($data['Resources']) || !is_array($data['Resources'])) {
+                throw new \RuntimeException("SCIM {$label} 响应格式错误");
+            }
+            foreach ($data['Resources'] as $resource) {
+                if (!is_array($resource) || empty($resource['id'])) {
+                    throw new \RuntimeException("SCIM {$label} 资源格式错误");
+                }
+                yield $resource;
+            }
+
+            $total = max(0, (int)($data['totalResults'] ?? 0));
+            $returned = count($data['Resources']);
+            $index += $returned;
+            if ($returned === 0) {
+                break;
+            }
+        } while ($index <= $total);
+    }
+
+    private function getResourceById(string $basePath, string $id, string $label): array
+    {
+        if ($id === '' || !preg_match('/^[A-Za-z0-9._~+-]+$/', $id)) {
+            throw new \InvalidArgumentException("SCIM {$label} ID 无效");
+        }
+        return $this->getResource($basePath . '/' . rawurlencode($id), $label);
+    }
+
+    private function getResource(string $path, string $label): array
+    {
+        $resp = $this->get($path);
         if (!$resp->successful()) {
-            throw new \RuntimeException('SCIM 用户获取失败: ' . $resp->body());
+            throw new \RuntimeException("SCIM {$label}获取失败: " . $resp->body());
         }
 
-        $user = $resp->json();
-        if (!is_array($user) || empty($user['id'])) {
-            throw new \RuntimeException('SCIM 用户响应格式错误');
+        $resource = $resp->json();
+        if (!is_array($resource) || empty($resource['id'])) {
+            throw new \RuntimeException("SCIM {$label}响应格式错误");
         }
-        return $user;
+        return $resource;
     }
 
     private function get(string $path, array $query = []): Response

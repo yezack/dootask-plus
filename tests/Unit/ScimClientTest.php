@@ -3,6 +3,7 @@
 namespace Tests\Unit;
 
 use App\Scim\ScimClient;
+use App\Scim\ScimResourceNotFoundException;
 use Illuminate\Http\Client\Request;
 use Illuminate\Support\Facades\Http;
 use Tests\TestCase;
@@ -59,6 +60,22 @@ class ScimClientTest extends TestCase
         $client = new ScimClient();
         $client->clearTokenCache();
         $this->assertSame('user-1', $client->findUserByEmail('050846@sjq.sh')['id']);
+    }
+
+    public function test_get_user_throws_typed_not_found_exception(): void
+    {
+        Http::fake([
+            'https://auth.example.com/oauth/token' => Http::response([
+                'access_token' => 'token-1',
+                'expires_in' => 1800,
+            ]),
+            'https://auth.example.com/scim/v2/Users/user-404' => Http::response([], 404),
+        ]);
+
+        $client = new ScimClient();
+        $client->clearTokenCache();
+        $this->expectException(ScimResourceNotFoundException::class);
+        $client->getUserById('user-404');
     }
 
     public function test_get_user_refreshes_token_once_after_unauthorized_response(): void

@@ -4,6 +4,7 @@ namespace Tests\Unit;
 
 use App\Scim\ScimUserMapper;
 use PHPUnit\Framework\TestCase;
+use ReflectionMethod;
 
 class ScimUserMapperTest extends TestCase
 {
@@ -58,6 +59,11 @@ class ScimUserMapperTest extends TestCase
             'emails' => [
                 ['value' => '066182@sjq.sh', 'primary' => true],
                 ['value' => 'other@sjq.sh', 'primary' => true],
+            ],
+        ]));
+        $this->assertSame('', ScimUserMapper::extractPrimaryEmail([
+            'emails' => [
+                ['value' => 'invalid', 'primary' => true],
             ],
         ]));
     }
@@ -129,5 +135,15 @@ class ScimUserMapperTest extends TestCase
         $this->assertSame('', $mapped['department']);
         $this->assertSame([], $mapped['direct_group_ids']);
         $this->assertSame('', $mapped['tel']);
+    }
+
+    public function test_authoritative_department_replacement_can_remove_stale_memberships(): void
+    {
+        $method = new ReflectionMethod(ScimUserMapper::class, 'targetDepartmentIds');
+        $method->setAccessible(true);
+
+        $this->assertSame([2], $method->invoke(null, [1, 2], [], [2], true));
+        $this->assertSame([1, 2], $method->invoke(null, [1, 2], [], [], false));
+        $this->assertSame([2, 3], $method->invoke(null, [1, 2], [3], [2], true));
     }
 }

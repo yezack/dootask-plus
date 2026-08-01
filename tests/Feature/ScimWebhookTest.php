@@ -2,6 +2,7 @@
 
 namespace Tests\Feature;
 
+use App\Scim\ScimWebhookUserSynchronizer;
 use Tests\TestCase;
 
 class ScimWebhookTest extends TestCase
@@ -63,6 +64,46 @@ class ScimWebhookTest extends TestCase
             ->assertJson(['error' => 'invalid signature']);
     }
 
+    public function test_webhook_dispatches_user_event_to_synchronizer(): void
+    {
+        config(['dootask.scim.webhook_secret' => 'secret']);
+        $event = 'urn:ietf:params:scim:event:prov:patch:notice';
+        $synchronizer = $this->mock(ScimWebhookUserSynchronizer::class);
+        $synchronizer->shouldReceive('sync')
+            ->once()
+            ->with('/Users/user-1', [$event])
+            ->andReturn('updated');
+
+        $token = $this->setToken([$event => []]);
+        $signature = hash_hmac('sha256', $token, 'secret');
+        $this->call('POST', '/api/scim/webhook', [], [], [], [
+            'CONTENT_TYPE' => 'application/secevent+jwt',
+            'HTTP_X_SCIM_EVENT_SIGNATURE' => $signature,
+        ], $token)->assertOk()->assertJson([
+            'received' => true,
+            'result' => 'updated',
+        ]);
+    }
+
+    public function test_webhook_releases_replay_key_when_processing_fails(): void
+    {
+        config(['dootask.scim.webhook_secret' => 'secret']);
+        $event = 'urn:ietf:params:scim:event:prov:delete';
+        $synchronizer = $this->mock(ScimWebhookUserSynchronizer::class);
+        $synchronizer->shouldReceive('sync')->twice()->andThrow(new \RuntimeException('failed'));
+
+        $token = $this->setToken([$event => []]);
+        $signature = hash_hmac('sha256', $token, 'secret');
+        $server = [
+            'CONTENT_TYPE' => 'application/secevent+jwt',
+            'HTTP_X_SCIM_EVENT_SIGNATURE' => $signature,
+        ];
+
+        $this->call('POST', '/api/scim/webhook', [], [], [], $server, $token)->assertStatus(500);
+        $this->call('POST', '/api/scim/webhook', [], [], [], $server, $token)->assertStatus(500)
+            ->assertJsonMissing(['duplicate' => true]);
+    }
+
     public function test_webhook_ignores_replayed_set(): void
     {
         config(['dootask.scim.webhook_secret' => 'secret']);
@@ -93,7 +134,7 @@ class ScimWebhookTest extends TestCase
         ];
 
         return $this->base64Url(json_encode($header)) . '.'
-            . $this->base64Url(json_encode($payload)) . '.signature';
+            . $this->base64Url(json_encode($payload)) . '.' . $this->base64Url('signature');
     }
 
     private function base64Url(string $value): string

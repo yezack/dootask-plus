@@ -3,9 +3,8 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
-use App\Scim\ScimClient;
 use App\Scim\ScimSet;
-use App\Scim\ScimUserMapper;
+use App\Scim\ScimWebhookUserSynchronizer;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Log;
@@ -41,7 +40,11 @@ class ScimWebhookController extends Controller
         $signature = strtolower(trim((string)$request->header('X-SCIM-Event-Signature', '')));
         $expected = hash_hmac('sha256', $token, $secret);
         if ($token === '' || !hash_equals($expected, $signature)) {
-            Log::warning('SCIM webhook: HMAC 签名验证失败');
+            Log::warning('SCIM webhook: HMAC 签名验证失败', [
+                'token_len' => strlen($token),
+                'signature_len' => strlen($signature),
+                'secret_len' => strlen($secret),
+            ]);
             return response()->json(['error' => 'invalid signature'], 401);
         }
 
@@ -65,11 +68,7 @@ class ScimWebhookController extends Controller
         }
 
         try {
-            $scimUser = (new ScimClient())->getUserByUri($set['sub_id']['uri']);
-            $result = ScimUserMapper::sync($scimUser);
-            if ($result === 'failed') {
-                throw new \RuntimeException('SCIM 用户同步失败');
-            }
+            $result = app(ScimWebhookUserSynchronizer::class)->sync($set['sub_id']['uri'], $events);
         } catch (\Throwable $e) {
             Cache::forget($replayKey);
             Log::error('SCIM webhook: 处理失败', ['error' => $e->getMessage()]);

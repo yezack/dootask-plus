@@ -59,6 +59,7 @@ SCIM_SERVER_URL=https://oauth.example.com
 SCIM_ISSUER=
 SCIM_CLIENT_ID=<UniAuthSync client id>
 SCIM_CLIENT_SECRET=<UniAuthSync client secret>
+SCIM_VERIFY_TLS=true
 SCIM_POLL_INTERVAL=60
 SCIM_LOCK_SECONDS=3600
 SCIM_WEBHOOK_SECRET=<同 scim_event_secret>
@@ -71,6 +72,10 @@ SCIM_SYNC_DEPARTMENT=true
 SCIM_REPLACE_DEPARTMENTS=false
 SCIM_REACTIVATE_USERS=false
 ```
+
+`SCIM_VERIFY_TLS=true` 默认校验 UniAuthSync 的 HTTPS 证书。隔离内网使用自签名证书时，可在确认网络边界可信后设置为 `false`；公网或跨网络部署不要关闭证书校验。
+
+UniAuthSync 的 OIDC 单点登录链路使用独立开关 `UNIAUTH_VERIFY_TLS=true`，同样仅在可信隔离内网自签名场景下设置为 `false`。
 
 手动同步：
 

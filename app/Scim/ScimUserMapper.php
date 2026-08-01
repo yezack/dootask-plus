@@ -41,6 +41,7 @@ class ScimUserMapper
             return 'failed';
         }
         $user = $localUsers->first();
+        ScimIdentityMap::remember($scimUser);
 
         // 停用优先于资料校验，避免异常资料阻断离职/删除事件。
         if ($attrs['disable_at']) {
@@ -75,10 +76,12 @@ class ScimUserMapper
         $departmentIds = config('dootask.scim.sync_department', true)
             ? self::resolveDepartmentIds($attrs['direct_group_ids'], $groupDepartmentIds)
             : [];
+        $hasExistingDepartment = $user && $user->department !== [];
         if (!$allowWithoutDepartment
             && config('dootask.scim.sync_department', true)
             && config('dootask.scim.require_department', true)
-            && $departmentIds === []) {
+            && $departmentIds === []
+            && !$hasExistingDepartment) {
             Log::error('SCIM: 用户没有可用的直接分组部门映射', [
                 'email' => $email,
                 'direct_group_ids' => $attrs['direct_group_ids'],
@@ -125,6 +128,39 @@ class ScimUserMapper
             return 'created';
         } catch (\Throwable $e) {
             Log::error('SCIM: 创建用户失败', ['email' => $email, 'error' => $e->getMessage()]);
+            return 'failed';
+        }
+    }
+
+    /**
+     * 上游 delete 事件已无法读取 SCIM User 时，按此前缓存的唯一邮箱停用本地用户。
+     */
+    public static function disableByExternalId(string $externalId): string
+    {
+        $email = ScimIdentityMap::email($externalId);
+        if ($email === '') {
+            Log::warning('SCIM: 删除事件缺少可用的外部身份映射', ['external_id' => $externalId]);
+            return 'failed';
+        }
+
+        $localUsers = User::whereEmail($email)->get();
+        if ($localUsers->count() !== 1) {
+            Log::error('SCIM: 删除事件邮箱无法唯一匹配本地用户', [
+                'external_id' => $externalId,
+                'email' => $email,
+                'matches' => $localUsers->count(),
+            ]);
+            return 'failed';
+        }
+
+        try {
+            return self::disableUser($localUsers->first(), $email);
+        } catch (\Throwable $e) {
+            Log::error('SCIM: 删除事件停用用户失败', [
+                'external_id' => $externalId,
+                'email' => $email,
+                'error' => $e->getMessage(),
+            ]);
             return 'failed';
         }
     }
@@ -278,21 +314,38 @@ class ScimUserMapper
             $changed = true;
         }
 
-        $canUpdateDepartment = $departmentIds !== []
-            && ($oldDepartmentIds === [] || config('dootask.scim.replace_departments', false));
-        if ($canUpdateDepartment && $departmentIds !== $oldDepartmentIds) {
-            $user->department = Base::arrayImplode($departmentIds);
+        $targetDepartmentIds = $oldDepartmentIds;
+        if (!$allowWithoutDepartment && config('dootask.scim.replace_departments', false)) {
+            // 主负责人和协管关系由部门模型维护，不能被普通成员关系替换逻辑移除。
+            $requiredDepartmentIds = self::requiredManagedDepartmentIds((int)$user->userid);
+            $targetDepartmentIds = self::targetDepartmentIds(
+                $oldDepartmentIds,
+                $departmentIds,
+                $requiredDepartmentIds,
+                true
+            );
+        } elseif ($departmentIds !== []) {
+            $targetDepartmentIds = self::targetDepartmentIds(
+                $oldDepartmentIds,
+                $departmentIds,
+                [],
+                false
+            );
+        }
+        $oldDepartmentIdsSorted = $oldDepartmentIds;
+        sort($oldDepartmentIdsSorted);
+        if ($targetDepartmentIds !== $oldDepartmentIdsSorted) {
+            $user->department = Base::arrayImplode($targetDepartmentIds);
             $changed = true;
         }
         if (!$changed) {
             return 'skipped';
         }
 
-        DB::transaction(function () use ($user, $oldDepartmentIds, $departmentIds) {
+        DB::transaction(function () use ($user, $oldDepartmentIds, $targetDepartmentIds) {
             $user->save();
-            if ($departmentIds !== [] && ($oldDepartmentIds === [] || config('dootask.scim.replace_departments', false))
-                && $departmentIds !== $oldDepartmentIds) {
-                self::syncDepartmentGroups($user->userid, $oldDepartmentIds, $departmentIds);
+            if ($targetDepartmentIds !== $oldDepartmentIds) {
+                self::syncDepartmentGroups($user->userid, $oldDepartmentIds, $targetDepartmentIds);
             }
         });
         Log::info('SCIM: 更新用户', ['email' => $email]);
@@ -317,6 +370,34 @@ class ScimUserMapper
 
         Log::info('SCIM: 停用用户', ['email' => $email]);
         return 'updated';
+    }
+
+    private static function requiredManagedDepartmentIds(int $userid): array
+    {
+        if ($userid <= 0) {
+            return [];
+        }
+        $primary = UserDepartment::whereOwnerUserid($userid)->pluck('id')->map(fn($id) => (int)$id)->toArray();
+        $deputy = DB::table('user_department_owners')
+            ->where('userid', $userid)
+            ->pluck('department_id')
+            ->map(fn($id) => (int)$id)
+            ->toArray();
+        return array_values(array_unique(array_merge($primary, $deputy)));
+    }
+
+    private static function targetDepartmentIds(
+        array $oldDepartmentIds,
+        array $syncedDepartmentIds,
+        array $requiredManagedDepartmentIds,
+        bool $replace
+    ): array {
+        $ids = $replace
+            ? array_merge($syncedDepartmentIds, $requiredManagedDepartmentIds)
+            : array_merge($oldDepartmentIds, $syncedDepartmentIds);
+        $ids = array_values(array_unique(array_map('intval', $ids)));
+        sort($ids);
+        return $ids;
     }
 
     private static function resolveDepartmentIds(array $directGroupIds, ?array $groupDepartmentIds): array

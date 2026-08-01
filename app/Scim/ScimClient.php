@@ -17,12 +17,14 @@ class ScimClient
     private string $baseUrl;
     private string $clientId;
     private string $clientSecret;
+    private bool $verifyTls;
 
     public function __construct()
     {
         $this->baseUrl      = rtrim((string)config('dootask.scim.server_url', ''), '/');
         $this->clientId     = (string)config('dootask.scim.client_id', '');
         $this->clientSecret = (string)config('dootask.scim.client_secret', '');
+        $this->verifyTls     = (bool)config('dootask.scim.verify_tls', true);
 
         if ($this->baseUrl === '' || $this->clientId === '' || $this->clientSecret === '') {
             throw new \RuntimeException('SCIM 配置不完整，请检查 SCIM_SERVER_URL、SCIM_CLIENT_ID 和 SCIM_CLIENT_SECRET');
@@ -39,7 +41,7 @@ class ScimClient
             return $cached;
         }
 
-        $resp = Http::asForm()->timeout(30)->post("{$this->baseUrl}/oauth/token", [
+        $resp = $this->http()->asForm()->timeout(30)->post("{$this->baseUrl}/oauth/token", [
             'grant_type'    => 'client_credentials',
             'client_id'     => $this->clientId,
             'client_secret' => $this->clientSecret,
@@ -136,9 +138,25 @@ class ScimClient
         return $this->getResourceById('/scim/v2/Groups', $id, '分组');
     }
 
+    public function getGroupByUri(string $uri): array
+    {
+        if (!preg_match('#^/Groups/[A-Za-z0-9._~%+-]+$#', $uri)) {
+            throw new \InvalidArgumentException('SCIM 分组 URI 无效');
+        }
+        return $this->getResource('/scim/v2' . $uri, '分组');
+    }
+
     public function getOrganizationById(string $id): array
     {
         return $this->getResourceById('/scim/v2/Organizations', $id, '组织');
+    }
+
+    public function getOrganizationByUri(string $uri): array
+    {
+        if (!preg_match('#^/Organizations/[A-Za-z0-9._~%+-]+$#', $uri)) {
+            throw new \InvalidArgumentException('SCIM 组织 URI 无效');
+        }
+        return $this->getResource('/scim/v2' . $uri, '组织');
     }
 
     /**
@@ -189,6 +207,9 @@ class ScimClient
     private function getResource(string $path, string $label): array
     {
         $resp = $this->get($path);
+        if ($resp->status() === 404) {
+            throw new ScimResourceNotFoundException("SCIM {$label}不存在");
+        }
         if (!$resp->successful()) {
             throw new \RuntimeException("SCIM {$label}获取失败: " . $resp->body());
         }
@@ -202,15 +223,21 @@ class ScimClient
 
     private function get(string $path, array $query = []): Response
     {
-        $resp = Http::withToken($this->getAccessToken())
+        $resp = $this->http()->withToken($this->getAccessToken())
             ->timeout(30)
             ->get($this->baseUrl . $path, $query);
         if ($resp->status() === 401) {
             $this->clearTokenCache();
-            $resp = Http::withToken($this->getAccessToken())
+            $resp = $this->http()->withToken($this->getAccessToken())
                 ->timeout(30)
                 ->get($this->baseUrl . $path, $query);
         }
         return $resp;
+    }
+
+    private function http(): \Illuminate\Http\Client\PendingRequest
+    {
+        $request = Http::acceptJson();
+        return $this->verifyTls ? $request : $request->withoutVerifying();
     }
 }

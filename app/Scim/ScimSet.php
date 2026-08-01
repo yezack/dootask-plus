@@ -12,8 +12,17 @@ class ScimSet
         }
 
         $header = json_decode(self::base64UrlDecode($segments[0]), true);
-        if (!is_array($header) || ($header['alg'] ?? '') !== 'RS256') {
+        $validTyp = ($header['typ'] ?? '') === 'secevent+jwt';
+        if (!is_array($header) || ($header['alg'] ?? '') !== 'RS256' || !$validTyp) {
+            \Illuminate\Support\Facades\Log::warning('SCIM webhook: SET header 格式错误', [
+                'header' => $header,
+                'alg' => $header['alg'] ?? 'MISSING',
+                'typ' => $header['typ'] ?? 'MISSING',
+            ]);
             throw new \InvalidArgumentException('SET header 格式错误');
+        }
+        if (self::base64UrlDecode($segments[2]) === '') {
+            throw new \InvalidArgumentException('SET signature 格式错误');
         }
 
         $payload = json_decode(self::base64UrlDecode($segments[1]), true);
@@ -52,7 +61,11 @@ class ScimSet
 
         $subject = $payload['sub_id'] ?? [];
         if (!is_array($subject) || ($subject['format'] ?? '') !== 'scim'
-            || !preg_match('#^/Users/[A-Za-z0-9._~-]+$#', (string)($subject['uri'] ?? ''))) {
+            || !preg_match('#^/(?:Users|Groups|Organizations)/[A-Za-z0-9._~%+-]+$#', (string)($subject['uri'] ?? ''))) {
+            \Illuminate\Support\Facades\Log::warning('SCIM webhook: SET subject 无效', [
+                'sub_id' => $subject,
+                'uri' => $subject['uri'] ?? 'MISSING',
+            ]);
             throw new \InvalidArgumentException('SET subject 无效');
         }
 

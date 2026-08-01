@@ -26,6 +26,22 @@ class ScimSetTest extends TestCase
         $this->assertArrayHasKey('urn:ietf:params:scim:event:prov:patch:notice', $set['events']);
     }
 
+    public function test_parse_rejects_wrong_type(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('header');
+
+        ScimSet::parse($this->token([], ['typ' => 'JWT']));
+    }
+
+    public function test_parse_rejects_empty_signature(): void
+    {
+        $this->expectException(InvalidArgumentException::class);
+        $this->expectExceptionMessage('signature');
+
+        ScimSet::parse($this->token([], [], ''));
+    }
+
     public function test_parse_rejects_wrong_audience(): void
     {
         $this->expectException(InvalidArgumentException::class);
@@ -66,7 +82,7 @@ class ScimSetTest extends TestCase
         ScimSet::parse($this->token(['exp' => null]));
     }
 
-    private function token(array $override = []): string
+    private function token(array $override = [], array $headerOverride = [], string $signature = 'signature'): string
     {
         $payload = array_merge([
             'iss' => 'https://auth.example.com',
@@ -78,8 +94,9 @@ class ScimSetTest extends TestCase
             'events' => ['urn:ietf:params:scim:event:prov:patch:notice' => []],
         ], $override);
 
-        return $this->base64Url(json_encode(['alg' => 'RS256', 'typ' => 'secevent+jwt'])) . '.'
-            . $this->base64Url(json_encode($payload)) . '.signature';
+        $header = array_merge(['alg' => 'RS256', 'typ' => 'secevent+jwt'], $headerOverride);
+        return $this->base64Url(json_encode($header)) . '.'
+            . $this->base64Url(json_encode($payload)) . '.' . $this->base64Url($signature);
     }
 
     private function base64Url(string $value): string

@@ -10,6 +10,7 @@ use Firebase\JWT\JWK;
 use Firebase\JWT\JWT;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Http\Client\PendingRequest;
 use RuntimeException;
 use Throwable;
 
@@ -262,15 +263,15 @@ class UniAuthService
     private function discovery(array $config): array
     {
         $cacheKey = self::DISCOVERY_PREFIX . hash('sha256', $config['issuer']);
-        $metadata = Cache::get($cacheKey);
+        $metadata = $this->cacheStore()->get($cacheKey);
         if (!is_array($metadata)) {
-            $response = Http::acceptJson()->timeout((int)$config['http_timeout'])
+            $response = $this->http($config)->acceptJson()->timeout((int)$config['http_timeout'])
                 ->get(rtrim($config['issuer'], '/') . '/.well-known/openid-configuration');
             if (!$response->successful() || !is_array($response->json())) {
                 throw new RuntimeException('OIDC discovery failed');
             }
             $metadata = $response->json();
-            Cache::put($cacheKey, $metadata, (int)$config['jwks_cache_seconds']);
+            $this->cacheStore()->put($cacheKey, $metadata, (int)$config['jwks_cache_seconds']);
         }
 
         if (!is_string($metadata['issuer'] ?? null) || !hash_equals($config['issuer'], $metadata['issuer'])) {
@@ -288,7 +289,7 @@ class UniAuthService
 
     private function exchangeCode(string $endpoint, string $code, string $verifier, array $config): array
     {
-        $response = Http::asForm()->acceptJson()->timeout((int)$config['http_timeout'])->post($endpoint, [
+        $response = $this->http($config)->asForm()->acceptJson()->timeout((int)$config['http_timeout'])->post($endpoint, [
             'grant_type' => 'authorization_code',
             'code' => $code,
             'redirect_uri' => $config['redirect_uri'],
@@ -358,14 +359,14 @@ class UniAuthService
     private function findJwk(string $uri, string $kid, array $config, bool $refresh): ?array
     {
         $cacheKey = self::JWKS_PREFIX . hash('sha256', $config['issuer'] . '|' . $uri);
-        $jwks = $refresh ? null : Cache::get($cacheKey);
+        $jwks = $refresh ? null : $this->cacheStore()->get($cacheKey);
         if (!is_array($jwks)) {
-            $response = Http::acceptJson()->timeout((int)$config['http_timeout'])->get($uri);
+            $response = $this->http($config)->acceptJson()->timeout((int)$config['http_timeout'])->get($uri);
             if (!$response->successful() || !is_array($response->json('keys'))) {
                 throw new RuntimeException('OIDC JWKS request failed');
             }
             $jwks = $response->json();
-            Cache::put($cacheKey, $jwks, (int)$config['jwks_cache_seconds']);
+            $this->cacheStore()->put($cacheKey, $jwks, (int)$config['jwks_cache_seconds']);
         }
 
         foreach ($jwks['keys'] ?? [] as $jwk) {
@@ -378,7 +379,7 @@ class UniAuthService
 
     private function confirmUserInfo(string $endpoint, string $accessToken, string $sub, array $config): void
     {
-        $response = Http::withToken($accessToken)->acceptJson()->timeout((int)$config['http_timeout'])->get($endpoint);
+        $response = $this->http($config)->withToken($accessToken)->acceptJson()->timeout((int)$config['http_timeout'])->get($endpoint);
         $userInfoSub = $response->json('sub');
         if (!$response->successful() || !is_string($userInfoSub) || !hash_equals($sub, $userInfoSub)) {
             throw new RuntimeException('OIDC userinfo subject does not match');
@@ -393,7 +394,7 @@ class UniAuthService
             return;
         }
         try {
-            Http::asForm()->acceptJson()->timeout((int)$config['http_timeout'])->post($metadata['revocation_endpoint'], [
+            $this->http($config)->asForm()->acceptJson()->timeout((int)$config['http_timeout'])->post($metadata['revocation_endpoint'], [
                 'token' => $refreshToken,
                 'token_type_hint' => 'refresh_token',
                 'client_id' => $config['client_id'],
@@ -406,6 +407,12 @@ class UniAuthService
     private function scimClient(): ScimClient
     {
         return $this->scimClient ??= new ScimClient();
+    }
+
+    private function http(array $config): PendingRequest
+    {
+        $request = Http::acceptJson();
+        return ($config['verify_tls'] ?? true) ? $request : $request->withoutVerifying();
     }
 
     private function stateKey(string $state): string

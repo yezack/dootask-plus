@@ -39,11 +39,16 @@ class ScimPrincipalSynchronizer
         ];
 
         foreach ($references as $scimUserId => $contexts) {
-            $scimUser = $usersById[$scimUserId] ?? $client->getUserById($scimUserId);
+            $scimUser = $usersById[$scimUserId] ?? null;
+            if (!is_array($scimUser)
+                || !array_key_exists('active', $scimUser)
+                || ScimUserMapper::extractPrimaryEmail($scimUser) === '') {
+                $scimUser = $client->getUserById($scimUserId);
+            }
             if ($this->scalar($scimUser['id'] ?? '') !== $scimUserId) {
                 throw new \RuntimeException("SCIM 负责人用户 ID 响应不一致: {$scimUserId}");
             }
-            if (($scimUser['active'] ?? true) !== true) {
+            if (($scimUser['active'] ?? null) !== true) {
                 throw new \RuntimeException(
                     "SCIM 负责人或协管用户已停用: {$scimUserId} (" . implode(', ', $contexts) . ')'
                 );
@@ -99,16 +104,23 @@ class ScimPrincipalSynchronizer
                 throw new \RuntimeException('SCIM Group 缺少 ID');
             }
 
-            $owners = $this->references($group['owners'] ?? []);
-            if (count($owners) !== 1) {
+            // UniAuthSync 将负责人放在 admins 字段；若 owners 存在则优先，否则以 admins[0] 为 owner
+            $rawOwners = $group['owners'] ?? [];
+            $rawAdmins = $group['admins'] ?? [];
+            if (empty($rawOwners) && !empty($rawAdmins)) {
+                $rawOwners = [reset($rawAdmins)];
+                $rawAdmins = array_slice($rawAdmins, 1);
+            }
+            $owners = $this->references($rawOwners);
+            if (count($owners) > 1) {
                 throw new \RuntimeException(
-                    "SCIM Group 必须且只能配置一名负责人: {$groupName} ({$groupId}), 实际 " . count($owners) . ' 名'
+                    "SCIM Group 最多配置一名负责人: {$groupName} ({$groupId}), 实际 " . count($owners) . ' 名'
                 );
             }
             foreach ($owners as $userId) {
                 $references[$userId][] = "Group {$groupName} owner";
             }
-            foreach ($this->references($group['admins'] ?? []) as $userId) {
+            foreach ($this->references($rawAdmins) as $userId) {
                 if (in_array($userId, $owners, true)) {
                     continue;
                 }

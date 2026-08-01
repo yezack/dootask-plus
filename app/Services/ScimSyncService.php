@@ -6,12 +6,13 @@ use App\Module\Base;
 use App\Scim\ScimClient;
 use App\Scim\ScimDepartmentSynchronizer;
 use App\Scim\ScimPrincipalSynchronizer;
+use App\Scim\ScimSyncValidator;
 use App\Scim\ScimUserMapper;
 use Illuminate\Support\Facades\Cache;
 
 class ScimSyncService
 {
-    public function run(?string $email = null): ?array
+    public function run(?string $email = null, bool $dryRun = false): ?array
     {
         $lock = Cache::lock('scim:sync', max(1, (int)config('dootask.scim.lock_seconds', 3600)));
         if (!$lock->get()) {
@@ -19,13 +20,31 @@ class ScimSyncService
         }
 
         try {
-            if ($email === null) {
+            if ($email === null && !$dryRun) {
                 Base::setting('system', [
                     'scim_last_attempt' => now()->toDateTimeString(),
                 ], true);
             }
 
             $client = new ScimClient();
+            if ($dryRun) {
+                $organizations = config('dootask.scim.sync_department', true)
+                    ? iterator_to_array($client->listOrganizations(), false)
+                    : [];
+                $groups = config('dootask.scim.sync_department', true)
+                    ? iterator_to_array($client->listGroups(), false)
+                    : [];
+                $users = iterator_to_array($client->listUsers(), false);
+                return [
+                    'dry_run' => true,
+                    'validation' => app(ScimSyncValidator::class)->validate(
+                        $organizations,
+                        $groups,
+                        $users,
+                        $email
+                    ),
+                ];
+            }
             $stats = [
                 'created' => 0,
                 'updated' => 0,
@@ -46,6 +65,12 @@ class ScimSyncService
                 'group_department_ids' => [],
                 'errors' => [],
             ];
+            // 定向同步必须先确认目标存在，避免无效邮箱触发全局负责人和部门写入。
+            $targetScimUser = $email !== null ? $client->findUserByEmail($email) : null;
+            if ($email !== null && $targetScimUser === null) {
+                throw new \RuntimeException("SCIM 中未找到邮箱用户: {$email}");
+            }
+
             $allScimUsers = null;
             if (config('dootask.scim.sync_department', true)) {
                 $organizations = iterator_to_array($client->listOrganizations(), false);
@@ -70,7 +95,7 @@ class ScimSyncService
             $stats['departments'] = $departmentStats;
 
             $users = $email !== null
-                ? array_filter([$client->findUserByEmail($email)])
+                ? [$targetScimUser]
                 : ($allScimUsers ?? $client->listUsers());
             foreach ($users as $scimUser) {
                 $result = ScimUserMapper::sync($scimUser, $departmentStats['group_department_ids']);

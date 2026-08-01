@@ -27,6 +27,7 @@ use App\Models\AbstractModel;
 use App\Models\UserCheckinFace;
 use App\Models\UserCheckinMac;
 use App\Models\UserDepartment;
+use App\Services\UniAuthService;
 use App\Models\WebSocketDialog;
 use App\Models\UserCheckinRecord;
 use App\Models\WebSocketDialogMsg;
@@ -78,8 +79,7 @@ class UsersController extends AbstractController
         $email = trim(Request::input('email'));
         $password = trim(Request::input('password'));
         $isRegVerify = Base::settingFind('emailSetting', 'reg_verify') === 'open';
-        $localLoginRestricted = config('dootask.uniauth.enabled')
-            && !config('dootask.uniauth.allow_local_login', true);
+        $localLoginRestricted = !app(UniAuthService::class)->isLocalLoginAllowed();
         if ($type == 'reg') {
             if ($localLoginRestricted) {
                 return Base::retError('未开放注册');

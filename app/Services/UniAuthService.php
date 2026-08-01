@@ -26,9 +26,33 @@ class UniAuthService
     {
     }
 
+    public static function configuredMode(array $config): string
+    {
+        $mode = strtolower(trim((string)($config['mode'] ?? '')));
+        if (in_array($mode, ['disabled', 'available', 'required'], true)) {
+            return $mode;
+        }
+
+        // Backward compatibility for deployments that still use the two boolean flags.
+        if (!(bool)($config['enabled'] ?? false)) {
+            return 'disabled';
+        }
+        return (bool)($config['allow_local_login'] ?? true) ? 'available' : 'required';
+    }
+
+    public function mode(): string
+    {
+        return self::configuredMode((array)config('dootask.uniauth', []));
+    }
+
     public function isEnabled(): bool
     {
-        return (bool)config('dootask.uniauth.enabled', false);
+        return $this->mode() !== 'disabled';
+    }
+
+    public function isLocalLoginAllowed(): bool
+    {
+        return $this->mode() !== 'required';
     }
 
     public function buildAuthorizeUrl(string $from, string $origin): string

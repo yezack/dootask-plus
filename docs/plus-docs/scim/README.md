@@ -2,7 +2,7 @@
 
 DooTask Plus 从 [UniAuthSync](https://github.com/yezack/UniAuthSync) 同步用户，不新增 SCIM 专用表或字段，尽量复用 DooTask 原有用户、部门和离职机制。
 
-> SCIM 负责账号预配与资料同步，不等同于 OIDC 单点登录。当前登录仍使用 DooTask 原有登录流程。
+> SCIM 负责账号预配与资料同步，OIDC 负责统一登录，两者可独立启用。启用 OIDC 不代表已经启用 SCIM 权威同步。
 
 ## 字段映射
 
@@ -12,12 +12,13 @@ DooTask Plus 从 [UniAuthSync](https://github.com/yezack/UniAuthSync) 同步用�
 | `displayName` | `users.nickname` | 同步姓名并刷新拼音字段 |
 | enterprise `division` + `title` | `users.profession` | 例如 `警察 - 民警` |
 | custom `phone` | `users.tel` | 电话未被占用时同步 |
-| enterprise `department` | `users.department` | 只匹配唯一同名的现有部门，不创建部门 |
+| Organizations / Groups | `user_departments` | 按稳定外部 ID 映射并创建或更新部门树 |
+| User direct Groups | `users.department` | 映射到对应 DooTask 部门；可配置为权威替换 |
 | `active=false` | `disable_at` + `identity=disable` | 按原有离职机制禁用 |
 
 SCIM `id`、`org_id`、身份证等字段不落库。用户邮箱变更会失去关联，因此 UniAuthSync 中已同步用户的邮箱应保持稳定。
 
-部门采用保守默认策略：只给尚无部门的用户绑定唯一同名部门，不覆盖人工维护的部门。设置 `SCIM_REPLACE_DEPARTMENTS=true` 后，UniAuthSync 组织会替换用户现有部门并同步部门群成员。
+设置 `SCIM_REPLACE_DEPARTMENTS=true` 后，UniAuthSync 的直接 Group 成员关系会权威替换用户部门，同时保留该用户作为负责人或协管必须加入的部门。
 
 `active=true` 默认不恢复 DooTask 中人工离职的用户；设置 `SCIM_REACTIVATE_USERS=true` 后才由 UniAuthSync 状态自动恢复。
 
@@ -76,6 +77,25 @@ SCIM_REACTIVATE_USERS=false
 `SCIM_VERIFY_TLS=true` 默认校验 UniAuthSync 的 HTTPS 证书。隔离内网使用自签名证书时，可在确认网络边界可信后设置为 `false`；公网或跨网络部署不要关闭证书校验。
 
 UniAuthSync 的 OIDC 单点登录链路使用独立开关 `UNIAUTH_VERIFY_TLS=true`，同样仅在可信隔离内网自签名场景下设置为 `false`。
+
+## OIDC 统一登录模式
+
+```env
+# disabled：禁用统一登录，仅显示 DooTask 本地登录
+# available：统一登录和本地登录同时可用
+# required：普通用户必须统一登录，管理员保留应急本地登录入口
+UNIAUTH_MODE=available
+```
+
+`UNIAUTH_MODE` 是当前推荐配置。留空时继续兼容旧配置：
+
+| 旧配置 | 等效模式 |
+|---|---|
+| `UNIAUTH_ENABLED=false` | `disabled` |
+| `UNIAUTH_ENABLED=true` 且 `UNIAUTH_ALLOW_LOCAL_LOGIN=true` | `available` |
+| `UNIAUTH_ENABLED=true` 且 `UNIAUTH_ALLOW_LOCAL_LOGIN=false` | `required` |
+
+`required` 模式会在后端拒绝普通用户的本地密码登录和注册，不能通过直接调用 API 绕过；登录页只保留统一登录主入口和管理员应急登录入口。
 
 手动同步：
 

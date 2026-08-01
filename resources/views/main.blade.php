@@ -28,8 +28,9 @@
             origin: window.location.origin + "/",
             homeUrl: null,
             apiUrl: null,
-            uniauthEnabled: @json((bool) config('dootask.uniauth.enabled')),
-            uniauthLocalLoginAllowed: @json((bool) config('dootask.uniauth.allow_local_login', true))
+            uniauthMode: @json(app('App\\Services\\UniAuthService')->mode()),
+            uniauthEnabled: @json(app('App\\Services\\UniAuthService')->isEnabled()),
+            uniauthLocalLoginAllowed: @json(app('App\\Services\\UniAuthService')->isLocalLoginAllowed())
         };
     </script>
 </head>

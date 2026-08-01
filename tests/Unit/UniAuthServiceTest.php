@@ -7,6 +7,26 @@ use PHPUnit\Framework\TestCase;
 
 class UniAuthServiceTest extends TestCase
 {
+    public function test_configured_mode_supports_three_states(): void
+    {
+        $this->assertSame('disabled', UniAuthService::configuredMode(['mode' => 'disabled', 'enabled' => true]));
+        $this->assertSame('available', UniAuthService::configuredMode(['mode' => 'available']));
+        $this->assertSame('required', UniAuthService::configuredMode(['mode' => 'required']));
+    }
+
+    public function test_configured_mode_keeps_legacy_boolean_compatibility(): void
+    {
+        $this->assertSame('disabled', UniAuthService::configuredMode([
+            'mode' => '', 'enabled' => false, 'allow_local_login' => true,
+        ]));
+        $this->assertSame('available', UniAuthService::configuredMode([
+            'mode' => '', 'enabled' => true, 'allow_local_login' => true,
+        ]));
+        $this->assertSame('required', UniAuthService::configuredMode([
+            'mode' => '', 'enabled' => true, 'allow_local_login' => false,
+        ]));
+    }
+
     public function test_normalize_return_path_accepts_relative_and_same_origin_urls(): void
     {
         $origin = 'https://dootask.example.com';

@@ -53,6 +53,8 @@ return [
 
     // UniAuthSync Web OIDC 登录
     'uniauth' => [
+        // disabled / available / required；留空时兼容旧的 ENABLED + ALLOW_LOCAL_LOGIN 配置
+        'mode' => env('UNIAUTH_MODE', ''),
         'enabled' => env('UNIAUTH_ENABLED', false),
         'allow_local_login' => env('UNIAUTH_ALLOW_LOCAL_LOGIN', true),
         'allow_insecure_http' => env('UNIAUTH_ALLOW_INSECURE_HTTP', false),

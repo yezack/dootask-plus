@@ -264,11 +264,21 @@ export default {
         },
 
         uniauthVisible() {
-            return !this.$isSoftware && !this.$isEEUIApp && window.systemInfo.uniauthEnabled === true
+            return !this.$isSoftware && !this.$isEEUIApp && this.uniauthMode !== 'disabled'
+        },
+
+        uniauthMode() {
+            const mode = window.systemInfo.uniauthMode
+            if (['disabled', 'available', 'required'].includes(mode)) {
+                return mode
+            }
+            return window.systemInfo.uniauthEnabled === true
+                ? (window.systemInfo.uniauthLocalLoginAllowed === false ? 'required' : 'available')
+                : 'disabled'
         },
 
         localLoginVisible() {
-            return !this.uniauthVisible || window.systemInfo.uniauthLocalLoginAllowed !== false || this.emergencyLoginVisible
+            return this.uniauthMode !== 'required' || this.emergencyLoginVisible
         },
 
         welcomeTitle() {

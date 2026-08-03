@@ -39,6 +39,7 @@ use App\Models\UserTag;
 use App\Models\UserTagRecognition;
 use App\Models\UserAppSort;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Cookie;
 use App\Models\UserEmailVerification;
 use App\Module\AgoraIO\AgoraTokenGenerator;
 use Swoole\Coroutine;
@@ -301,6 +302,17 @@ class UsersController extends AbstractController
     public function logout()
     {
         UserDevice::forget();
+        Cookie::queue(Cookie::make(
+            'dootask_uniauth_prompt',
+            'select_account',
+            5,
+            '/',
+            null,
+            Request::secure(),
+            true,
+            false,
+            'lax'
+        ));
         return Base::retSuccess('退出成功');
     }
 

@@ -91,7 +91,7 @@ class ScimUserMapper
 
         if ($user) {
             try {
-                return self::updateUser($user, $attrs, $departmentIds, $email);
+                return self::updateUser($user, $attrs, $departmentIds, $email, $allowWithoutDepartment);
             } catch (\Throwable $e) {
                 Log::error('SCIM: 更新用户失败', ['email' => $email, 'error' => $e->getMessage()]);
                 return 'failed';
@@ -105,7 +105,7 @@ class ScimUserMapper
             ? $passwordPrefix . $userName
             : 'Aa1!' . bin2hex(random_bytes(14));
         $options = [
-            'changePass'  => true,
+            'changePass'  => false,
             'emailVerity' => false,
             'profession'  => $attrs['profession'] ?? '',
             'department'  => $departmentIds,
@@ -281,7 +281,13 @@ class ScimUserMapper
         return is_scalar($value) ? trim((string)$value) : '';
     }
 
-    private static function updateUser(User $user, array $attrs, array $departmentIds, string $email): string
+    private static function updateUser(
+        User $user,
+        array $attrs,
+        array $departmentIds,
+        string $email,
+        bool $allowWithoutDepartment
+    ): string
     {
         $oldDepartmentIds = $user->department;
         $changed = false;

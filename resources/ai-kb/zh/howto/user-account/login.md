@@ -25,6 +25,7 @@ negative:
   - 多次失败后系统会强制要求填验证码（[[user-account.login-codeimg.howto]]）
   - 统一身份登录只匹配 UniAuthSync SCIM 中明确的邮箱与已有 DooTask 账号，不会自动注册或创建本地账号
   - 统一身份登录失败、凭据过期或账号未匹配时，返回登录页并显示通用错误提示，请联系管理员核对账号邮箱及统一认证配置
+  - SCIM 创建的用户不会因本地随机初始密码而被强制跳转到修改密码页面
 last_verified: v1.8.89
 ---
 
@@ -48,6 +49,10 @@ DooTask 同时支持以下登录方式（在登录页可切换）：
 2. 跳转到 UniAuthSync 完成认证和授权
 3. 系统按 OIDC `sub` 查询 SCIM 用户，并以 SCIM 中明确、合法的邮箱唯一匹配已有 DooTask 账号
 4. 匹配成功后签发 DooTask 自有 token 并进入系统；不会把 UniAuthSync token 直接用作 DooTask token
+
+正常统一登录会复用 UniAuthSync 当前会话。用户从 DooTask 主动退出后，下一次统一登录会进入账号选择页，可继续当前账号或切换账号；这是 OIDC `prompt=select_account` 的标准语义。需要强制重新输入凭据时使用 `prompt=login`，无交互探测使用 `prompt=none`。
+
+SCIM 预配的新用户使用随机本地密码占位，并将 `changepass` 设为 `0`。因此统一身份登录成功后会直接进入 DooTask，不要求用户修改一个自己并不知道的本地随机密码。
 
 当管理员关闭普通本地登录入口时，登录页仍提供「管理员应急登录」入口。该入口只允许已有 DooTask 管理员使用本地账号密码登录，普通用户仍必须通过统一身份登录；同时关闭本地注册。
 

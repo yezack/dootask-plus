@@ -7,6 +7,7 @@ use App\Module\Base;
 use App\Services\UniAuthService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cookie;
 use Illuminate\Support\Facades\Log;
 use Throwable;
 
@@ -22,11 +23,17 @@ class UniAuthController extends Controller
         }
 
         try {
+            $prompt = (string)$request->query('prompt', '');
+            if ($prompt === '' && $request->cookie('dootask_uniauth_prompt') === 'select_account') {
+                $prompt = 'select_account';
+            }
             $authorizeUrl = $service->buildAuthorizeUrl(
                 (string)$request->query('from', ''),
-                $request->getSchemeAndHttpHost()
+                $request->getSchemeAndHttpHost(),
+                $prompt
             );
-            return redirect()->away($authorizeUrl);
+            return redirect()->away($authorizeUrl)
+                ->withCookie(Cookie::forget('dootask_uniauth_prompt'));
         } catch (Throwable $e) {
             Log::warning('UniAuth login initialization failed', [
                 'exception' => $e::class,

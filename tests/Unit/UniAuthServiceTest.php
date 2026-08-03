@@ -27,6 +27,13 @@ class UniAuthServiceTest extends TestCase
         ]));
     }
 
+    public function test_normalize_prompt_accepts_standard_values_and_rejects_unknown_values(): void
+    {
+        $this->assertSame('select_account', UniAuthService::normalizePrompt(' SELECT_ACCOUNT '));
+        $this->assertSame('login', UniAuthService::normalizePrompt('login'));
+        $this->assertSame('', UniAuthService::normalizePrompt('unsupported'));
+    }
+
     public function test_normalize_return_path_accepts_relative_and_same_origin_urls(): void
     {
         $origin = 'https://dootask.example.com';

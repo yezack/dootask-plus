@@ -1077,7 +1077,9 @@ export default {
                 if (appendFrom === false) {
                     from = null;
                 }
-                $A.goForward({name: 'login', query: from ? {from: from} : {}}, true);
+                const query = from ? {from: from} : {};
+                query.uniauth_prompt = 'select_account';
+                $A.goForward({name: 'login', query}, true);
                 resolve();
             });
         })

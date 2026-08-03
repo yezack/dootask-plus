@@ -366,7 +366,14 @@ export default {
 
         onUniAuthLogin() {
             const fromUrl = this.safeFrom(this.$route.query.from)
-            window.location.assign('/api/uniauth/login' + (fromUrl ? `?from=${encodeURIComponent(fromUrl)}` : ''))
+            const prompt = ['none', 'login', 'consent', 'select_account'].includes(String(this.$route.query.uniauth_prompt || ''))
+                ? String(this.$route.query.uniauth_prompt)
+                : ''
+            const query = new URLSearchParams()
+            if (fromUrl) query.set('from', fromUrl)
+            if (prompt) query.set('prompt', prompt)
+            const queryString = query.toString()
+            window.location.assign('/api/uniauth/login' + (queryString ? `?${queryString}` : ''))
         },
 
         showEmergencyLogin() {

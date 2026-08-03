@@ -16,6 +16,7 @@ use Throwable;
 
 class UniAuthService
 {
+    private const ALLOWED_PROMPTS = ['', 'none', 'login', 'consent', 'select_account'];
     private const STATE_PREFIX = 'uniauth:state:';
     private const TICKET_PREFIX = 'uniauth:ticket:';
     private const LOCK_PREFIX = 'uniauth:lock:';
@@ -55,8 +56,9 @@ class UniAuthService
         return $this->mode() !== 'required';
     }
 
-    public function buildAuthorizeUrl(string $from, string $origin): string
+    public function buildAuthorizeUrl(string $from, string $origin, string $prompt = ''): string
     {
+        $prompt = self::normalizePrompt($prompt);
         $config = $this->validatedConfig();
         $metadata = $this->discovery($config);
         $state = self::randomToken(32);
@@ -81,9 +83,16 @@ class UniAuthService
             'nonce' => $nonce,
             'code_challenge' => $challenge,
             'code_challenge_method' => 'S256',
+            ...($prompt !== '' ? ['prompt' => $prompt] : []),
         ], '', '&', PHP_QUERY_RFC3986);
 
         return $metadata['authorization_endpoint'] . '?' . $query;
+    }
+
+    public static function normalizePrompt(string $prompt): string
+    {
+        $prompt = strtolower(trim($prompt));
+        return in_array($prompt, self::ALLOWED_PROMPTS, true) ? $prompt : '';
     }
 
     public function completeLogin(string $code, string $state): array

@@ -74,6 +74,8 @@ SCIM_REPLACE_DEPARTMENTS=false
 SCIM_REACTIVATE_USERS=false
 ```
 
+SCIM 创建的新用户会将 `changepass` 设为 `0`，不会要求用户修改 DooTask 的本地随机初始密码。统一登录由 OIDC 完成；若需要允许用户使用本地密码，应由管理员另行重置并安全告知用户。
+
 `SCIM_VERIFY_TLS=true` 默认校验 UniAuthSync 的 HTTPS 证书。隔离内网使用自签名证书时，可在确认网络边界可信后设置为 `false`；公网或跨网络部署不要关闭证书校验。
 
 UniAuthSync 的 OIDC 单点登录链路使用独立开关 `UNIAUTH_VERIFY_TLS=true`，同样仅在可信隔离内网自签名场景下设置为 `false`。
@@ -96,6 +98,8 @@ UNIAUTH_MODE=available
 | `UNIAUTH_ENABLED=true` 且 `UNIAUTH_ALLOW_LOCAL_LOGIN=false` | `required` |
 
 `required` 模式会在后端拒绝普通用户的本地密码登录和注册，不能通过直接调用 API 绕过；登录页只保留统一登录主入口和管理员应急登录入口。
+
+统一登录使用 OIDC `prompt` 参数控制会话交互：普通登录不带 `prompt` 时复用 UniAuthSync 会话；DooTask 明确退出时设置一个短时、一次性的 HttpOnly 标记，下一次登录自动使用 `prompt=select_account` 并清除该标记，用户可继续当前 UniAuthSync 账号或切换账号。`login` 强制重新认证，`consent` 强制显示授权确认，`none` 禁止交互并在需要登录或授权时返回 `login_required` / `consent_required`。
 
 手动同步：
 

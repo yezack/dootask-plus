@@ -1,6 +1,10 @@
-* text=auto
+* text=auto eol=lf
 *.sh text eol=lf
+*.bash text eol=lf
+*.zsh text eol=lf
 *.conf text eol=lf
+cmd text eol=lf
+Dockerfile text eol=lf
 *.css linguist-vendored
 *.scss linguist-vendored
 *.js linguist-vendored

@@ -2,7 +2,9 @@
 
 namespace Tests\Unit;
 
+use App\Scim\ScimClient;
 use App\Scim\ScimPrincipalSynchronizer;
+use App\Scim\ScimResourceNotFoundException;
 use PHPUnit\Framework\TestCase;
 use ReflectionMethod;
 
@@ -66,6 +68,33 @@ class ScimPrincipalSynchronizerTest extends TestCase
                 ['display' => '050668'],
             ],
         ]]);
+    }
+
+    public function test_missing_principal_reports_user_group_and_role(): void
+    {
+        $client = new class extends ScimClient {
+            public function __construct()
+            {
+            }
+
+            public function getUserById(string $id): array
+            {
+                throw new ScimResourceNotFoundException('SCIM 用户不存在');
+            }
+        };
+
+        $this->expectException(\RuntimeException::class);
+        $this->expectExceptionMessage(
+            'SCIM 负责人或协管用户不存在: missing-user (Group 数据应用 owner)'
+        );
+
+        (new ScimPrincipalSynchronizer())->sync([[
+            'id' => 'group-1',
+            'displayName' => '数据应用',
+            'owners' => [
+                ['value' => 'missing-user'],
+            ],
+        ]], [], $client);
     }
 
     private function collectReferences(array $groups): array

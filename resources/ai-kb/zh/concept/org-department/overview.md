@@ -17,7 +17,7 @@ related_tools: []
 related_pages: []
 prerequisites: []
 negative:
-  - 部门层级最多 3 级（顶级 + 2 层子部门）
+  - 部门层级最多 9 级（顶级 + 8 层子部门）
   - 每个部门最多 20 个直属子部门
   - 全系统最多 200 个部门
   - 同一用户最多负责（owner_userid）10 个部门
@@ -28,7 +28,7 @@ last_verified: v1.7.90
 # 部门是什么
 
 ## 定义
-部门（department）是 DooTask 用于描述公司组织结构的树形单位。每个部门有名称、上级部门（parent_id）、唯一的部门负责人（owner_userid）和可选的部门管理员（deputy）。部门之间通过 parent_id 形成树形结构，最多 3 级。
+部门（department）是 DooTask 用于描述公司组织结构的树形单位。每个部门有名称、上级部门（parent_id）、唯一的部门负责人（owner_userid）和可选的部门管理员（deputy）。部门之间通过 parent_id 形成树形结构，最多 9 级。
 
 ## 关键属性
 - **name**：部门名称，2-20 字，不能含特殊符号或字符串 `(M)`

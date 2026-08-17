@@ -94,7 +94,10 @@ export default defineConfig(({command, mode}) => {
 
     return {
         base: basePath,
-        publicDir: publicPath,
+        // Static assets are copied by vitePluginFileCopy. Using publicPath here
+        // makes Vite recursively copy public/ into itself on deployed systems,
+        // including runtime uploads that may not be readable by the build user.
+        publicDir: false,
         server: {
             host,
             port,

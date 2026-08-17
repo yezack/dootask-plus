@@ -43,7 +43,15 @@ class ScimPrincipalSynchronizer
             if (!is_array($scimUser)
                 || !array_key_exists('active', $scimUser)
                 || ScimUserMapper::extractPrimaryEmail($scimUser) === '') {
-                $scimUser = $client->getUserById($scimUserId);
+                try {
+                    $scimUser = $client->getUserById($scimUserId);
+                } catch (ScimResourceNotFoundException $e) {
+                    throw new \RuntimeException(
+                        "SCIM 负责人或协管用户不存在: {$scimUserId} (" . implode(', ', $contexts) . ')',
+                        0,
+                        $e
+                    );
+                }
             }
             if ($this->scalar($scimUser['id'] ?? '') !== $scimUserId) {
                 throw new \RuntimeException("SCIM 负责人用户 ID 响应不一致: {$scimUserId}");

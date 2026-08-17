@@ -473,6 +473,7 @@ features:
       - user-account.register.howto
       - user-account.search.howto
       - user-account.entry.menu-map
+      - user-account.scim-principal-missing.faq
 
   - id: user-settings
     name: 个人设置（资料/语言/主题/快捷键/签到设置）

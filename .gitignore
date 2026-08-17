@@ -4,6 +4,7 @@
 
 # Build and temporary files
 /build
+/public/js/build
 /public/hot
 /public/tmp
 /tmp
